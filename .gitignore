@@ -1,0 +1,41 @@
+# Environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Node
+web/node_modules/
+web/.next/
+web/out/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# HELIX runtime
+.helix/
+*.log
+*.session
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Build artifacts
+*.so
+*.dylib

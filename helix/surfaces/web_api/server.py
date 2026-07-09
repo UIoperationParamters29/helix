@@ -1,0 +1,231 @@
+"""FastAPI + WebSocket server.
+
+Streams events to the web UI in real time.
+REST endpoints for session management, file browsing, tool listing.
+"""
+from __future__ import annotations
+
+import asyncio, json, uuid
+from pathlib import Path
+from typing import Any
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+
+from ...config import HelixConfig
+from ...conversation import Conversation
+from ...events import Event, MessageEvent, ActionEvent, ObservationEvent, AgentErrorEvent, FinishEvent
+from ...memory.manager import load_memory, init_memory_files
+from ...skills.loader import load_skill_summaries
+from ...tools import all_tools
+
+
+def create_app(config: HelixConfig | None = None) -> FastAPI:
+    cfg = config or HelixConfig.load()
+    init_memory_files(cfg.home, cfg.persona)
+
+    app = FastAPI(title="HELIX", version="0.1.0")
+
+    # CORS — allow the dev frontend
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # In-memory session registry
+    sessions: dict[str, Conversation] = {}
+
+    def get_or_create_session(session_id: str | None = None) -> Conversation:
+        if session_id and session_id in sessions:
+            return sessions[session_id]
+        new_id = session_id or uuid.uuid4().hex[:16]
+        conv = Conversation(config=cfg, session_id=new_id)
+        conv.load_history()
+        sessions[new_id] = conv
+        return conv
+
+    # --- REST endpoints ---
+
+    @app.get("/api/health")
+    async def health():
+        return {"ok": True, "version": "0.1.0", "provider": cfg.provider, "model": cfg.model}
+
+    @app.get("/api/status")
+    async def status():
+        return {
+            "home": str(cfg.home),
+            "provider": cfg.provider,
+            "model": cfg.model,
+            "on_termux": cfg.on_termux,
+            "api_key_set": bool(cfg.api_key),
+            "base_url": cfg.base_url,
+            "persona": cfg.persona,
+        }
+
+    @app.get("/api/tools")
+    async def list_tools():
+        tools = all_tools(cfg)
+        return [{
+            "name": t.name,
+            "description": t.description,
+            "parameters": t.parameters,
+            "dangerous": t.dangerous,
+            "read_only": t.read_only,
+            "tags": t.tags,
+        } for t in tools]
+
+    @app.get("/api/skills")
+    async def list_skills():
+        return load_skill_summaries(cfg.home)
+
+    @app.get("/api/memory")
+    async def get_memory():
+        return load_memory(cfg.home)
+
+    @app.put("/api/memory/{kind}")
+    async def update_memory(kind: str, content: str = Body(..., media_type="text/plain")):
+        if kind not in ("IDENTITY", "USER", "MEMORY"):
+            raise HTTPException(400, "kind must be IDENTITY, USER, or MEMORY")
+        f = cfg.home / f"{kind}.md"
+        f.write_text(content, encoding="utf-8")
+        return {"ok": True, "path": str(f)}
+
+    @app.get("/api/sessions")
+    async def list_sessions():
+        sd = cfg.home / "sessions"
+        out = []
+        for f in sorted(sd.glob("*.jsonl")):
+            stat = f.stat()
+            out.append({
+                "id": f.stem,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+            })
+        return out
+
+    @app.get("/api/sessions/{session_id}")
+    async def get_session(session_id: str):
+        f = cfg.home / "sessions" / f"{session_id}.jsonl"
+        if not f.exists():
+            raise HTTPException(404, "session not found")
+        events = []
+        for line in f.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except Exception:
+                pass
+        return {"id": session_id, "events": events}
+
+    @app.post("/api/sessions/new")
+    async def new_session():
+        conv = get_or_create_session()
+        return {"session_id": conv.session_id}
+
+    @app.get("/api/files")
+    async def list_files(path: str = "."):
+        from ...tools.file import _resolve
+        p = _resolve(path, cfg.home)
+        if not p.exists():
+            raise HTTPException(404, "not found")
+        if p.is_file():
+            return {"type": "file", "path": str(p), "content": p.read_text(encoding="utf-8", errors="replace")[:50000]}
+        items = []
+        for f in sorted(p.iterdir()):
+            try:
+                items.append({
+                    "name": f.name,
+                    "is_dir": f.is_dir(),
+                    "size": f.stat().st_size if f.is_file() else 0,
+                    "modified": f.stat().st_mtime,
+                })
+            except Exception:
+                pass
+        return {"type": "dir", "path": str(p), "items": items}
+
+    # --- WebSocket: streaming chat ---
+
+    @app.websocket("/ws/chat")
+    async def ws_chat(ws: WebSocket):
+        await ws.accept()
+        try:
+            # First message: session setup
+            hello = await ws.receive_json()
+            session_id = hello.get("session_id")
+            conv = get_or_create_session(session_id)
+            await ws.send_json({"type": "session_ready", "session_id": conv.session_id})
+
+            # Register listener to push events to ws
+            queue: asyncio.Queue = asyncio.Queue()
+
+            def listener(event: Event):
+                try:
+                    queue.put_nowait({
+                        "type": event.type,
+                        "data": event.model_dump(),
+                    })
+                except Exception:
+                    pass
+
+            conv.add_listener(listener)
+
+            while True:
+                msg = await ws.receive_json()
+                if msg.get("type") == "send":
+                    user_text = msg.get("content", "").strip()
+                    if not user_text:
+                        continue
+                    # Run the agent loop, events stream via listener
+                    asyncio.create_task(_run_conversation(conv, user_text, queue, ws))
+                elif msg.get("type") == "approval":
+                    action_id = msg.get("action_id", "")
+                    decision = msg.get("decision", "denied")
+                    conv.resolve_approval(action_id, decision)
+
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            try:
+                await ws.send_json({"type": "error", "message": str(e)})
+            except Exception:
+                pass
+
+    async def _run_conversation(conv: Conversation, user_text: str, queue: asyncio.Queue, ws: WebSocket):
+        try:
+            async for event in conv.send(user_text):
+                # Events are pushed by listener; nothing to do here
+                pass
+            await ws.send_json({"type": "done"})
+        except Exception as e:
+            await ws.send_json({"type": "error", "message": str(e)})
+
+    # --- Static frontend (built Next.js) ---
+    web_dist = Path(__file__).parent.parent.parent.parent / "web" / "out"
+    if web_dist.exists():
+        app.mount("/", StaticFiles(directory=str(web_dist), html=True), name="frontend")
+    else:
+        @app.get("/")
+        async def root():
+            return JSONResponse({
+                "name": "HELIX",
+                "version": "0.1.0",
+                "note": "Web UI not built. Run: cd web && npm install && npm run build",
+                "api_docs": "/docs",
+            })
+
+    return app
+
+
+def run_server(config: HelixConfig | None = None):
+    import uvicorn
+    cfg = config or HelixConfig.load()
+    app = create_app(cfg)
+    print(f"\n  HELIX web UI:  http://localhost:{cfg.web_port}\n")
+    uvicorn.run(app, host=cfg.web_host, port=cfg.web_port, log_level="info")

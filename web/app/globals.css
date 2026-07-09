@@ -1,0 +1,144 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html, body {
+  background: #0a0e1a;
+  color: #f1f5f9;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+/* HELIX DNA gradient background */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(circle at 15% 20%, rgba(239, 68, 68, 0.10) 0%, transparent 35%),
+    radial-gradient(circle at 85% 80%, rgba(59, 130, 246, 0.10) 0%, transparent 35%),
+    radial-gradient(circle at 50% 50%, rgba(99, 102, 241, 0.05) 0%, transparent 60%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+#__next, main {
+  position: relative;
+  z-index: 1;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, #ef4444 0%, #3b82f6 100%);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: #6366f1; }
+
+/* Inputs */
+input, textarea, select {
+  background: #111827;
+  border: 1px solid #374151;
+  color: #f1f5f9;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.btn-primary {
+  background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+  color: white;
+}
+.btn-primary:hover { filter: brightness(1.15); }
+.btn-danger {
+  background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+  color: white;
+}
+.btn-danger:hover { filter: brightness(1.15); }
+.btn-ghost {
+  background: transparent;
+  color: #94a3b8;
+  border-color: #374151;
+}
+.btn-ghost:hover {
+  background: #1f2937;
+  color: #f1f5f9;
+}
+
+/* Card */
+.card {
+  background: rgba(17, 24, 39, 0.7);
+  backdrop-filter: blur(8px);
+  border: 1px solid #1f2937;
+  border-radius: 12px;
+}
+
+/* DNA logo (two strands red+blue) */
+.dna-logo {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  position: relative;
+}
+.dna-logo::before,
+.dna-logo::after {
+  content: '';
+  position: absolute;
+  width: 100%;
+  height: 4px;
+  top: 50%;
+  border-radius: 2px;
+}
+.dna-logo::before {
+  background: linear-gradient(90deg, #ef4444, transparent);
+  transform: translateY(-6px) rotate(20deg);
+}
+.dna-logo::after {
+  background: linear-gradient(90deg, transparent, #3b82f6);
+  transform: translateY(6px) rotate(-20deg);
+}
+
+/* Message animation */
+.msg-enter {
+  animation: slideUp 0.25s ease-out;
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Mobile-first: hide scrollbar but allow scroll */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* PWA: installable */
+@media (display-mode: standalone) {
+  body { user-select: none; }
+}
