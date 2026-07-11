@@ -62,13 +62,20 @@ def get_llm(config: HelixConfig | None = None) -> LLM:
 
     # Lazy import to avoid circular dependency
     from .openai_compat import OpenAICompatLLM
-    from .anthropic_provider import AnthropicLLM
 
     # All OpenAI-compatible endpoints go through OpenAICompatLLM
     if provider in ("openai", "zai", "ollama", "lmstudio", "custom"):
         return OpenAICompatLLM(config)
     elif provider == "anthropic":
-        return AnthropicLLM(config)
+        try:
+            from .anthropic_provider import AnthropicLLM
+            return AnthropicLLM(config)
+        except ImportError as e:
+            raise RuntimeError(
+                "Anthropic provider requires the 'anthropic' package. "
+                "Install it with: pip install -e \".[anthropic]\"  "
+                "(note: this needs Rust — run `pkg install rust` first on Termux)."
+            ) from e
     else:
         # Default: assume OpenAI-compatible
         return OpenAICompatLLM(config)

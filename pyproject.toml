@@ -4,33 +4,44 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "helix-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "HELIX — a self-improving, phone-native agent harness. Red-and-blue DNA of an agent that owns its own learning."
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "HELIX contributors"}]
 requires-python = ">=3.11"
+# Core deps: pure-Python or have prebuilt wheels for Termux aarch64.
+# NO Rust-required packages in core — they break Termux installs.
 dependencies = [
-    "openai>=1.40.0",        # OpenAI-compatible client (works with Z.ai, Ollama, LM Studio, etc.)
-    "anthropic>=0.34.0",     # Anthropic provider
-    "httpx>=0.27.0",         # HTTP client
-    "pydantic>=2.7.0",       # Typed events + actions
-    "tiktoken>=0.7.0",       # Token counting
+    "openai>=1.40.0",        # OpenAI-compatible client (Z.ai, Ollama, LM Studio, etc.)
+    "httpx>=0.27.0",         # HTTP client (pure Python)
+    "pydantic>=2.7.0",       # Typed events + actions (has wheels for py3.12/3.13 aarch64)
     "fastapi>=0.115.0",      # Web API + WebSocket
-    "uvicorn[standard]>=0.30.0",
-    "websockets>=12.0",
+    "uvicorn>=0.30.0",       # Plain uvicorn (no [standard] — avoids Rust/C exts)
+    "websockets>=12.0",      # Pure Python
     "python-dotenv>=1.0.0",
-    "rich>=13.7.0",          # Terminal UI
-    "prompt-toolkit>=3.0.0", # Interactive CLI
-    "click>=8.1.0",          # CLI commands
-    "croniter>=2.0.0",       # Cron scheduler (future)
+    "rich>=13.7.0",          # Terminal UI (pure Python)
+    "prompt-toolkit>=3.0.0", # Interactive CLI (pure Python)
+    "click>=8.1.0",          # CLI commands (pure Python)
+    "croniter>=2.0.0",       # Pure Python
     "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
+# Anthropic provider — requires jiter (Rust). Install Rust first:
+#   pkg install rust
+# Then: pip install -e ".[anthropic]"
+anthropic = ["anthropic>=0.34.0"]
+# Token counting — tiktoken also needs Rust on aarch64. Without it,
+# HELIX uses a pure-Python approximation (len/4) which is fine for limits.
+tokens = ["tiktoken>=0.7.0"]
+# Browser automation
 browser = ["playwright>=1.45"]
+# MCP server integration
 mcp = ["mcp>=0.9"]
+# Everything (assumes Rust toolchain available)
+full = ["anthropic>=0.34.0", "tiktoken>=0.7.0", "playwright>=1.45", "mcp>=0.9"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]
 
 [project.scripts]
 helix = "helix.__main__:main"
