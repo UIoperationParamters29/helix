@@ -13,7 +13,9 @@ build/
 # Node
 web/node_modules/
 web/.next/
-web/out/
+# NOTE: web/out/ is COMMITTED to the repo so Termux/Android users don't need
+# to run `npm run build` (Next.js SWC doesn't ship an android-arm64 binary).
+# If you change web/ source, rebuild and re-commit web/out/.
 
 # IDE
 .vscode/
