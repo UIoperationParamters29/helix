@@ -62,15 +62,22 @@ async def tui_main(config: HelixConfig) -> None:
     from ..memory.manager import init_memory_files
     init_memory_files(config.home, config.persona)
 
-    # Install SIGINT handler so Ctrl+C works even during blocking input().
-    # Without this, Ctrl+C only fires after Enter is pressed (because input()
-    # blocks the event loop from processing signals).
+    # Track whether we're currently running a task (streaming).
+    # Ctrl+C during a task → interrupt the task (not exit).
+    # Ctrl+C at the prompt → exit HELIX.
+    state = {"running": False}
+
     def _sigint_handler(signum, frame):
-        raise KeyboardInterrupt
+        if state["running"]:
+            # During a task — raise to interrupt the streaming loop
+            raise KeyboardInterrupt
+        else:
+            # At the prompt — exit the program
+            raise KeyboardInterrupt
     try:
         signal.signal(signal.SIGINT, _sigint_handler)
     except (ValueError, OSError):
-        pass  # not in main thread
+        pass
 
     conv = Conversation(config=config)
 
@@ -83,22 +90,28 @@ async def tui_main(config: HelixConfig) -> None:
                   f"[dim]Session:[/] {conv.session_id[:12]}")
     if config.on_termux:
         console.print("  [magenta]📱 Termux[/]")
-    console.print("  [dim]Type /help for commands · Ctrl+C to quit[/]")
+    console.print("  [dim]Type /help for commands · Ctrl+C to interrupt task (press twice to quit)[/]")
     console.print()
 
     if not config.api_key:
         console.print("  [bold red]⚠ No API key![/]  [cyan]export HELIX_API_KEY=your_key[/]\n")
 
     iter_count = 0
+    ctrl_c_count = 0  # track consecutive Ctrl+C presses
 
     while True:
         # Status + prompt
         try:
             console.print(f"  [dim]iter {iter_count}/{config.max_iterations} · session {conv.session_id[:8]}[/]")
             user_input = console.input("[bold cyan]›[/] ")
+            ctrl_c_count = 0  # reset on successful input
         except (EOFError, KeyboardInterrupt):
-            console.print("\n  [dim]Bye.[/]")
-            return
+            ctrl_c_count += 1
+            if ctrl_c_count >= 2:
+                console.print("\n  [dim]Bye.[/]")
+                return
+            console.print("\n  [yellow]Press Ctrl+C again to quit, or type a message.[/]")
+            continue
 
         user_input = user_input.strip()
         if not user_input:
@@ -113,7 +126,8 @@ async def tui_main(config: HelixConfig) -> None:
                 return
             continue
 
-        # Send to agent
+        # Send to agent — set running flag so Ctrl+C interrupts the task
+        state["running"] = True
         iter_count = 0
         streaming_text = ""
         streaming_active = False
@@ -162,13 +176,15 @@ async def tui_main(config: HelixConfig) -> None:
                     if event.reason != "completed":
                         console.print(f"  [dim]finished: {event.reason}[/]")
         except KeyboardInterrupt:
-            console.print("\n  [yellow]⚠ Interrupted.[/]")
+            console.print("\n  [yellow]⚠ Task interrupted — back to prompt.[/]")
             if streaming_active and streaming_text:
                 _render_assistant(streaming_text)
         except Exception as e:
             if streaming_active and streaming_text:
                 _render_assistant(streaming_text)
             console.print(f"  [bold red]✗ Fatal:[/] {type(e).__name__}: {e}")
+        finally:
+            state["running"] = False
 
         console.print()  # blank line between turns
 

@@ -220,9 +220,13 @@ class PhoneUiDump(Tool):
             except Exception as e:
                 return ToolResult.err(f"Read failed: {e}")
 
-        # Truncate if huge
-        if len(xml) > 30000:
-            xml = xml[:15000] + "\n[...truncated...]\n" + xml[-15000:]
+        # Clean up noise: uiautomator sometimes appends "UI hierarchy dumped to: /dev/tty"
+        xml = xml.replace("UI hierarchy dumped to: /dev/tty", "").replace("UI hierchary dumped to: /dev/tty", "")
+        xml = xml.strip()
+
+        # Truncate if huge — keep first 15k chars (usually enough for visible elements)
+        if len(xml) > 20000:
+            xml = xml[:10000] + "\n[...truncated...]\n" + xml[-5000:]
         return ToolResult.ok(xml, size=len(xml))
 
 
