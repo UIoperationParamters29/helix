@@ -307,3 +307,117 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
         fut = self._approval_queue.get(action_id)
         if fut and not fut.done():
             fut.set_result(decision)
+
+    # --- Streaming version (for TUI — shows text as it arrives) ---
+    async def send_streaming(self, user_text: str) -> AsyncIterator[Event]:
+        """Like send() but streams assistant text token-by-token.
+
+        Yields intermediate MessageEvent(role='assistant', content=partial)
+        events as text arrives. The final one has the complete content.
+        Tool calls still emit ActionEvent + ObservationEvent as in send().
+        """
+        user_evt = MessageEvent(role="user", content=user_text)
+        self.append(user_evt)
+        yield user_evt
+
+        messages = self._events_to_messages()
+        system = self._build_system_prompt()
+
+        for iteration in range(self.config.max_iterations):
+            # Try streaming first
+            try:
+                collected_content = ""
+                collected_tool_calls: list[dict] = []
+                current_tc: dict | None = None
+                tc_args_buffer: dict[str, str] = {}
+
+                async for chunk in self.llm.stream(messages=messages, tools=self._tool_schemas, system=system):
+                    if chunk.content:
+                        collected_content += chunk.content
+                        # Yield a partial message event (don't persist — just for UI)
+                        yield MessageEvent(role="assistant", content=collected_content)
+                    if chunk.tool_call_delta:
+                        d = chunk.tool_call_delta
+                        if d.get("id") and d.get("name"):
+                            # New tool call started
+                            if current_tc:
+                                # Finalize previous
+                                try:
+                                    import json as _json
+                                    current_tc["args"] = _json.loads("".join(tc_args_buffer.get(current_tc["id"], ""))) if tc_args_buffer.get(current_tc["id"]) else {}
+                                except Exception:
+                                    current_tc["args"] = {"_raw": tc_args_buffer.get(current_tc["id"], "")}
+                                collected_tool_calls.append(current_tc)
+                            current_tc = {"id": d["id"], "name": d["name"]}
+                            tc_args_buffer[d["id"]] = ""
+                        if d.get("args_fragment") and current_tc:
+                            tc_args_buffer[current_tc["id"]] = tc_args_buffer.get(current_tc["id"], "") + d["args_fragment"]
+                    if chunk.finish_reason:
+                        # Finalize last tool call
+                        if current_tc:
+                            try:
+                                import json as _json
+                                current_tc["args"] = _json.loads(tc_args_buffer.get(current_tc["id"], "")) if tc_args_buffer.get(current_tc["id"]) else {}
+                            except Exception:
+                                current_tc["args"] = {"_raw": tc_args_buffer.get(current_tc["id"], "")}
+                            collected_tool_calls.append(current_tc)
+                            current_tc = None
+                        break
+
+                # If we got tool calls, process them
+                if collected_tool_calls:
+                    # Emit a single assistant message with the full content (if any)
+                    if collected_content:
+                        thought = MessageEvent(role="assistant", content=collected_content)
+                        # Don't append here — the non-streaming send would, but for streaming
+                        # we just yield for display. The real persistence happens below.
+                        messages.append({"role": "assistant", "content": collected_content})
+
+                    for tc in collected_tool_calls:
+                        action = ActionEvent(
+                            tool=tc["name"],
+                            args=tc.get("args", {}),
+                            thought=collected_content,
+                        )
+                        action.id = tc.get("id", action.id)
+                        self.append(action)
+                        yield action
+                        messages.append(action.to_message())
+
+                        result = await self.executor.execute(tc["name"], tc.get("args", {}))
+                        obs = ObservationEvent(
+                            action_id=action.id,
+                            tool=tc["name"],
+                            output=result.output,
+                            is_error=result.is_error,
+                            metadata=result.metadata,
+                        )
+                        self.append(obs)
+                        yield obs
+                        messages.append(obs.to_message())
+                    continue
+                else:
+                    # No tool calls — final assistant message
+                    msg = MessageEvent(role="assistant", content=collected_content or "")
+                    self.append(msg)
+                    yield msg
+                    finish = FinishEvent(reason="completed")
+                    self.append(finish)
+                    yield finish
+                    return
+
+            except Exception as e:
+                err = AgentErrorEvent(message=f"LLM stream failed: {type(e).__name__}: {e}")
+                self.append(err)
+                yield err
+                finish = FinishEvent(reason="error")
+                self.append(finish)
+                yield finish
+                return
+
+        err = AgentErrorEvent(message=f"Hit max_iterations={self.config.max_iterations}")
+        self.append(err)
+        yield err
+        finish = FinishEvent(reason="max_iterations")
+        self.append(finish)
+        yield finish

@@ -25,6 +25,21 @@ from ..tools import all_tools
 console = Console()
 
 
+def _format_tool_args(tool: str, args: dict) -> str:
+    """Format tool arguments compactly for display."""
+    # Hide verbose args
+    hidden_keys = {"content", "text", "message", "command"}
+    parts = []
+    for k, v in args.items():
+        vs = repr(v) if not isinstance(v, str) else v
+        if k in hidden_keys and len(vs) > 60:
+            vs = vs[:57] + "..."
+        elif len(vs) > 80:
+            vs = vs[:77] + "..."
+        parts.append(f"{k}={vs}")
+    return ", ".join(parts)
+
+
 def _event_panel(event: Event) -> Panel | None:
     """Render an event as a Rich panel."""
     if isinstance(event, MessageEvent):
@@ -35,7 +50,7 @@ def _event_panel(event: Event) -> Panel | None:
             return Panel(Markdown(event.content),
                          title="[bold blue]HELIX[/]", border_style="blue")
     elif isinstance(event, ActionEvent):
-        args_str = ", ".join(f"{k}={v!r}" for k, v in event.args.items())
+        args_str = _format_tool_args(event.tool, event.args)
         if len(args_str) > 200:
             args_str = args_str[:200] + "..."
         return Panel(
@@ -163,12 +178,31 @@ def cli():
 @click.option("--model", default=None, help="Model name.")
 @click.option("--base-url", default=None, help="OpenAI-compatible base URL.")
 def chat(provider, model, base_url):
-    """Start an interactive chat session."""
+    """Start an interactive chat session (classic REPL mode)."""
     config = HelixConfig.load()
     if provider: config.provider = provider
     if model: config.model = model
     if base_url: config.base_url = base_url
     asyncio.run(chat_loop(config))
+
+
+@cli.command()
+@click.option("--provider", default=None, help="LLM provider (openai, anthropic, zai, ollama, lmstudio).")
+@click.option("--model", default=None, help="Model name.")
+@click.option("--base-url", default=None, help="OpenAI-compatible base URL.")
+def tui(provider, model, base_url):
+    """Launch the full-screen TUI (Hermes-style multi-pane interface).
+
+    Multi-pane layout: header / chat / sidebar (skills+memory+tools) / input.
+    Alternate-screen rendering — no scrollback clutter.
+    Slash commands: /help /skills /memory /tools /exit
+    """
+    config = HelixConfig.load()
+    if provider: config.provider = provider
+    if model: config.model = model
+    if base_url: config.base_url = base_url
+    from .tui import tui_main
+    asyncio.run(tui_main(config))
 
 
 @cli.command()
