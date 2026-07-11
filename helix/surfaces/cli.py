@@ -470,7 +470,7 @@ def adb():
     Run this command and follow the prompts. It will guide you through
     pairing your phone to itself via wireless ADB.
     """
-    import shutil, subprocess, os
+    import shutil, subprocess, os, re
     console.print(Panel.fit(
         "[bold]HELIX Self-ADB Setup[/]\n"
         "[dim]Pair your phone to itself for full UI control[/]",
@@ -496,7 +496,7 @@ def adb():
     # Check if adb is installed
     if not shutil.which("adb"):
         console.print("[yellow]⚠ adb not found. Installing android-tools...[/]")
-        os.system("pkg install -y android-tools")
+        subprocess.run(["pkg", "install", "-y", "android-tools"])
 
     if not shutil.which("adb"):
         console.print("[red]✗ Failed to install android-tools. Run: pkg install android-tools[/]")
@@ -504,64 +504,212 @@ def adb():
 
     console.print("[green]✓ adb is available[/]")
     console.print()
-    console.print("[bold]Step 1: Enable Wireless debugging[/]")
-    console.print("  1. Go to Settings → About Phone")
-    console.print("  2. Tap 'Build Number' 7 times to enable Developer Options")
-    console.print("  3. Go to Settings → Developer Options")
-    console.print("  4. Enable 'Wireless debugging'")
-    console.print()
-    input("  Press Enter when Wireless debugging is ON...")
 
+    # Helper: read from clipboard if termux-clipboard-get is available
+    def get_clipboard() -> str:
+        try:
+            r = subprocess.run(["termux-clipboard-get"], capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                return r.stdout.strip()
+        except Exception:
+            pass
+        return ""
+
+    # Helper: parse "IP:port" from a string (user might paste extra text)
+    def parse_addr(s: str) -> str | None:
+        # Match 192.168.1.42:37123 or [::1]:37123
+        m = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{4,5})', s)
+        if m:
+            return m.group(1)
+        # IPv6
+        m = re.search(r'(\[[0-9a-fA-F:]+\]:\d{4,5})', s)
+        if m:
+            return m.group(1)
+        return None
+
+    # Helper: parse 6-digit code from a string
+    def parse_code(s: str) -> str | None:
+        m = re.search(r'\b(\d{6})\b', s)
+        if m:
+            return m.group(1)
+        return None
+
+    # Helper: prompt with clipboard option
+    def prompt_with_clipboard(label: str, parser, example: str) -> str | None:
+        """Ask user for input, offering to use clipboard contents."""
+        console.print(f"  [bold]{label}[/]")
+        console.print(f"  [dim]Example: {example}[/]")
+        console.print(f"  [dim]Type it, or press 'c' + Enter to paste from clipboard[/]")
+        console.print()
+        while True:
+            try:
+                val = input("  › ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return None
+            if not val:
+                console.print("  [red]Empty input. Try again or Ctrl+C to abort.[/]")
+                continue
+            if val.lower() in ("c", "clip", "paste"):
+                clip = get_clipboard()
+                if clip:
+                    console.print(f"  [dim]Clipboard contents:[/]")
+                    console.print(f"  [cyan]{clip[:200]}[/]")
+                    parsed = parser(clip)
+                    if parsed:
+                        console.print(f"  [green]✓ Found: {parsed}[/]")
+                        return parsed
+                    else:
+                        console.print("  [yellow]Couldn't parse from clipboard. Type manually:[/]")
+                        continue
+                else:
+                    console.print("  [yellow]Clipboard empty or termux-clipboard-get not available.[/]")
+                    console.print("  [dim]Install with: pkg install termux-api[/]")
+                    continue
+            # Try to parse what they typed
+            parsed = parser(val)
+            if parsed:
+                return parsed
+            # If no parse, return as-is (might be valid format we didn't match)
+            return val
+
+    # --- Step 1: Enable Wireless debugging ---
+    console.print("[bold cyan]Step 1: Enable Wireless debugging[/]")
+    console.print("  Go to: [dim]Settings → System → Developer Options → Wireless debugging[/]")
+    console.print("  [dim](If you don't see Developer Options, tap 'Build Number' 7x in About Phone)[/]")
+    console.print("  [dim]Toggle it ON.[/]")
     console.print()
-    console.print("[bold]Step 2: Pair your device[/]")
-    console.print("  In Wireless debugging settings, tap 'Pair device with pairing code'.")
-    console.print("  You'll see an IP:port (e.g. 192.168.1.42:37123) and a 6-digit code.")
+    try:
+        input("  Press Enter when done...")
+    except (EOFError, KeyboardInterrupt):
+        return
     console.print()
-    pair_addr = input("  Enter the pairing IP:port (e.g. 192.168.1.42:37123): ").strip()
+
+    # --- Step 2: Pair ---
+    console.print("[bold cyan]Step 2: Pair your device[/]")
+    console.print("  In Wireless debugging settings, tap [bold]'Pair device with pairing code'[/]")
+    console.print("  A dialog appears showing:")
+    console.print("    • Wi-Fi pairing code: [bold green]6 digits[/]")
+    console.print("    • IP address & port: [bold green]192.168.x.x:xxxxx[/]")
+    console.print()
+    console.print("  [yellow]💡 Tip: Copy the IP:port to your clipboard before continuing.[/]")
+    console.print("     Long-press the IP:port text on the pairing screen → Copy.")
+    console.print("     Then type 'c' at the prompt below to paste.")
+    console.print()
+
+    pair_addr = prompt_with_clipboard(
+        "Enter the pairing IP:port",
+        parse_addr,
+        "192.168.1.42:37123"
+    )
     if not pair_addr:
-        console.print("[red]No address entered. Aborting.[/]")
+        console.print("[red]Aborted.[/]")
         return
-    pair_code = input("  Enter the 6-digit pairing code: ").strip()
+
+    pair_code = prompt_with_clipboard(
+        "Enter the 6-digit pairing code",
+        parse_code,
+        "123456"
+    )
     if not pair_code:
-        console.print("[red]No code entered. Aborting.[/]")
+        console.print("[red]Aborted.[/]")
         return
 
     console.print()
-    console.print(f"[dim]Pairing with {pair_addr}...[/]")
-    ret = os.system(f"adb pair {pair_addr} <<< '{pair_code}'")
-    if ret != 0:
-        console.print(f"[red]✗ Pairing failed (exit {ret}).[/]")
-        console.print("  Make sure you're on the same WiFi and the pairing screen is still open.")
+    console.print(f"[dim]Pairing with {pair_addr} using code {pair_code}...[/]")
+
+    # Use subprocess.run with input= instead of shell here-string (<<<)
+    # The <<< syntax is bash-only; Termux's /bin/sh is dash which doesn't support it.
+    try:
+        proc = subprocess.run(
+            ["adb", "pair", pair_addr],
+            input=pair_code + "\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # adb pair prints to stdout+stderr
+        output = (proc.stdout or "") + (proc.stderr or "")
+        console.print(f"  [dim]{output.strip()}[/]")
+        if proc.returncode != 0:
+            console.print(f"[red]✗ Pairing failed (exit {proc.returncode}).[/]")
+            console.print("  Common causes:")
+            console.print("    • Pairing dialog was closed (it times out in ~30s)")
+            console.print("    • Wrong IP:port (use the PAIRING port, not the connection port)")
+            console.print("    • Wrong code")
+            console.print("    • Different WiFi network")
+            console.print()
+            console.print("  [dim]Re-open the pairing dialog and try again.[/]")
+            return
+    except subprocess.TimeoutExpired:
+        console.print("[red]✗ Pairing timed out. The pairing dialog may have closed.[/]")
+        return
+    except Exception as e:
+        console.print(f"[red]✗ Error: {type(e).__name__}: {e}[/]")
         return
 
+    console.print(f"[green]✓ Paired![/]")
     console.print()
-    console.print("[bold]Step 3: Connect[/]")
-    console.print("  Go back to the main Wireless debugging screen.")
-    console.print("  Note the IP:port shown under your device name (different from pairing port).")
+
+    # --- Step 3: Connect ---
+    console.print("[bold cyan]Step 3: Connect[/]")
+    console.print("  Go BACK to the main Wireless debugging screen (not the pairing dialog).")
+    console.print("  You'll see your device name with an IP:port underneath — [bold]this is a DIFFERENT port[/].")
     console.print()
-    conn_addr = input("  Enter the connection IP:port (e.g. 192.168.1.42:41234): ").strip()
+    console.print("  [yellow]💡 Tip: This port is different from the pairing port.[/]")
+    console.print("     Long-press → Copy, then type 'c' at the prompt to paste.")
+    console.print()
+
+    conn_addr = prompt_with_clipboard(
+        "Enter the connection IP:port",
+        parse_addr,
+        "192.168.1.42:41234"
+    )
     if not conn_addr:
-        console.print("[red]No address entered. Aborting.[/]")
+        console.print("[red]Aborted.[/]")
         return
 
     console.print(f"[dim]Connecting to {conn_addr}...[/]")
-    ret = os.system(f"adb connect {conn_addr}")
-    if ret != 0:
-        console.print(f"[red]✗ Connection failed.[/]")
+    try:
+        proc = subprocess.run(
+            ["adb", "connect", conn_addr],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        console.print(f"  [dim]{output.strip()}[/]")
+    except Exception as e:
+        console.print(f"[red]✗ Connection error: {e}[/]")
         return
 
+    # --- Verify ---
     console.print()
-    console.print("[dim]Verifying...[/]")
-    os.system("adb devices")
-
-    # Save to config
-    console.print()
-    console.print(f"[green]✓ Self-ADB paired![/]")
-    console.print("  HELIX can now control your phone's UI.")
-    console.print("  Try in chat: 'take a screenshot' or 'tap the center of the screen'")
-    console.print()
-    console.print(f"  [dim]Note: ADB pairing expires after phone reboot.[/]")
-    console.print(f"  [dim]Re-run 'helix adb' to re-pair.[/]")
+    console.print("[dim]Verifying connection...[/]")
+    try:
+        proc = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
+        console.print(f"  [dim]{proc.stdout.strip()}[/]")
+        if "device" in proc.stdout and "offline" not in proc.stdout and "unauthorized" not in proc.stdout:
+            console.print()
+            console.print(Panel.fit(
+                "[bold green]✓ Self-ADB paired and connected![/]\n\n"
+                "[dim]HELIX can now control your phone's UI:[/]\n"
+                "  • Take screenshots\n"
+                "  • Tap, swipe, type\n"
+                "  • Launch and stop apps\n"
+                "  • Press hardware keys (back, home, etc.)\n\n"
+                "[dim]Try in chat:[/]\n"
+                "  [cyan]'take a screenshot'[/]\n"
+                "  [cyan]'tap the center of the screen'[/]\n"
+                "  [cyan]'open Chrome and go to youtube.com'[/]\n\n"
+                "[dim]Note: ADB pairing expires after phone reboot.[/]\n"
+                "[dim]Re-run 'helix adb' to re-pair.[/]",
+                border_style="green",
+            ))
+        else:
+            console.print("[yellow]⚠ Device shows as offline or unauthorized.[/]")
+            console.print("  Accept the 'Allow USB debugging?' dialog on your phone if it appeared.")
+    except Exception as e:
+        console.print(f"[red]✗ Verify error: {e}[/]")
 
 
 def main():
