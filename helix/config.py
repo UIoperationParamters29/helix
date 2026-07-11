@@ -119,7 +119,8 @@ class HelixConfig:
                 else:
                     setattr(cfg, k, env_val)
         # OpenAI env passthrough
-        if not cfg.api_key:
+        # If api_key is "***" (from old config saves that masked it), treat as empty
+        if not cfg.api_key or cfg.api_key == "***":
             cfg.api_key = os.environ.get("OPENAI_API_KEY", "")
         if not cfg.base_url:
             cfg.base_url = os.environ.get("OPENAI_BASE_URL")
@@ -134,9 +135,17 @@ class HelixConfig:
         data = {k: v for k, v in self.__dict__.items()
                 if k not in ("home",) and not k.startswith("_")}
         data["home"] = str(self.home)
-        # Don't persist api_key to file
-        data["api_key"] = "***" if self.api_key else ""
+        # Persist the real API key — this is the user's own machine.
+        # The old behavior of writing "***" caused load() to read back "***"
+        # as the api_key, which then failed auth.
+        # The config file permissions should protect it (chmod 600).
         (self.home / "config.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+        # Set restrictive permissions on config file
+        try:
+            import os, stat
+            os.chmod(self.home / "config.yaml", stat.S_IRUSR | stat.S_IWUSR)
+        except Exception:
+            pass
 
 
 def get_config() -> HelixConfig:

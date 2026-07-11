@@ -182,6 +182,7 @@ def run_model_switcher() -> None:
         options = [
             "Switch to a saved provider",
             "Add a new provider",
+            "Delete a saved provider",
             "List models on current gateway + pick one",
             "Test current model",
             "Set model name manually",
@@ -198,17 +199,19 @@ def run_model_switcher() -> None:
         elif idx == 1:
             _add_provider(config)
         elif idx == 2:
-            _pick_model(config)
+            _delete_provider(config)
         elif idx == 3:
-            _test_current(config)
+            _pick_model(config)
         elif idx == 4:
-            _set_model_manually(config)
+            _test_current(config)
         elif idx == 5:
+            _set_model_manually(config)
+        elif idx == 6:
             config.save()
             console.print(f"\n[green]✓ Saved to {config.home / 'config.yaml'}[/]")
             console.print(f"  [dim]Active model:[/] [cyan]{config.provider}/{config.model}[/]")
             return
-        elif idx == 6:
+        elif idx == 7:
             console.print("[dim]Exited without saving.[/]")
             return
 
@@ -238,6 +241,50 @@ def _switch_provider(config: HelixConfig) -> None:
     config.model = p.get("model", config.model)
     console.print(f"\n[green]✓ Switched to {p.get('name')}[/]")
     console.print(f"  [dim]Model:[/] [cyan]{config.model}[/]")
+
+
+def _delete_provider(config: HelixConfig) -> None:
+    """Delete a saved provider using arrow keys."""
+    if not config.saved_providers:
+        console.print("[yellow]No saved providers to delete.[/]")
+        return
+
+    # Build option labels
+    options = []
+    for p in config.saved_providers:
+        is_active = (p.get("base_url") == config.base_url and
+                    p.get("api_key") == config.api_key)
+        marker = " ← active" if is_active else ""
+        options.append(f"{p.get('name', '?')} — {p.get('model', '?')} ({p.get('base_url', '?')[:40]}){marker}")
+
+    idx = arrow_select(options, "Pick a provider to DELETE")
+    if idx is None:
+        return
+
+    p = config.saved_providers[idx]
+    name = p.get("name", "?")
+
+    # Confirm
+    console.print(f"\n[yellow]⚠ Delete '{name}'?[/]")
+    confirm_options = ["No, cancel", "Yes, delete it"]
+    confirm_idx = arrow_select(confirm_options, "Confirm")
+    if confirm_idx != 1:
+        console.print("[dim]Cancelled.[/]")
+        return
+
+    # Remove from list
+    config.saved_providers.pop(idx)
+    console.print(f"[green]✓ Deleted '{name}'[/]")
+
+    # If we deleted the active provider, clear the active config
+    if p.get("base_url") == config.base_url and p.get("api_key") == config.api_key:
+        console.print("[yellow]⚠ Deleted the active provider. Active config cleared.[/]")
+        if config.saved_providers:
+            console.print("[dim]Switch to another provider to set a new active config.[/]")
+        else:
+            config.api_key = ""
+            config.base_url = None
+            console.print("[dim]No providers left. Add one to use HELIX.[/]")
 
 
 def _add_provider(config: HelixConfig) -> None:
