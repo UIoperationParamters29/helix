@@ -178,6 +178,8 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
 
         Yields events as they happen. Caller can listen + render.
         """
+        from .text_utils import clean_for_llm, strip_ansi
+
         # Append user message
         user_evt = MessageEvent(role="user", content=user_text)
         self.append(user_evt)
@@ -248,7 +250,6 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                     # CRITICAL: strip ANSI/Rich color codes from tool output before
                     # sending to LLM. Otherwise the LLM sees [36m, [0m etc. and
                     # mimics them in its responses, producing garbage.
-                    from .text_utils import clean_for_llm
                     cleaned_output = clean_for_llm(result.output)
                     obs = ObservationEvent(
                         action_id=action.id,
@@ -267,7 +268,6 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                 # No tool calls — assistant is done
                 # Also strip any ANSI from the assistant's own response (in case
                 # the LLM still tries to emit color codes)
-                from .text_utils import strip_ansi
                 cleaned_content = strip_ansi(resp.content or "")
                 msg = MessageEvent(role="assistant", content=cleaned_content)
                 self.append(msg)
@@ -325,6 +325,8 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
         events as text arrives. The final one has the complete content.
         Tool calls still emit ActionEvent + ObservationEvent as in send().
         """
+        from .text_utils import clean_for_llm, strip_ansi
+
         user_evt = MessageEvent(role="user", content=user_text)
         self.append(user_evt)
         yield user_evt
@@ -394,7 +396,6 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                         messages.append(action.to_message())
 
                         result = await self.executor.execute(tc["name"], tc.get("args", {}))
-                        from .text_utils import clean_for_llm, strip_ansi
                         cleaned_output = clean_for_llm(result.output)
                         obs = ObservationEvent(
                             action_id=action.id,
