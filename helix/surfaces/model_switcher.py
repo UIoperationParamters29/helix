@@ -24,13 +24,80 @@ from .selector import arrow_select, arrow_select_or_type
 console = Console()
 
 
+def _clean_input(val: str) -> str:
+    """Aggressively clean input — strip all whitespace, control chars, zero-width."""
+    if not val:
+        return ""
+    # Remove ALL whitespace (including \r, \n, tabs, zero-width spaces)
+    import re
+    val = re.sub(r'\s+', '', val)
+    # Remove zero-width characters
+    val = val.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '')
+    val = val.replace('\ufeff', '').replace('\u00ad', '')
+    return val.strip()
+
+
 def _input(prompt: str, default: str = "") -> str:
-    """Input with default value."""
+    """Input with default value. Cleans aggressively."""
     try:
         val = input(prompt).strip()
         return val if val else default
     except (EOFError, KeyboardInterrupt):
         return ""
+
+
+def _input_secret(prompt: str, default: str = "") -> str:
+    """Input for sensitive values (API keys). Offers clipboard paste.
+
+    Termux's input() can mangle long pastes. This function:
+    1. Offers to paste from clipboard (type 'c')
+    2. Cleans the input aggressively (strips all whitespace + hidden chars)
+    3. Shows a verification (first 8 + last 4 chars) so user can confirm
+    """
+    import subprocess
+
+    def get_clipboard() -> str:
+        try:
+            r = subprocess.run(["termux-clipboard-get"], capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                return _clean_input(r.stdout)
+        except Exception:
+            pass
+        return ""
+
+    console.print(f"{prompt}")
+    console.print("  [dim]Type it, or press 'c' + Enter to paste from clipboard[/]")
+
+    while True:
+        try:
+            val = input("  › ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+
+        if val.lower() in ("c", "clip", "paste"):
+            clip = get_clipboard()
+            if clip:
+                # Show what we got (masked)
+                masked = clip[:8] + "..." + clip[-4:] if len(clip) > 12 else clip
+                console.print(f"  [dim]Clipboard:[/] [cyan]{masked}[/] ({len(clip)} chars)")
+                return clip
+            else:
+                console.print("  [yellow]Clipboard empty. Install termux-api: pkg install termux-api[/]")
+                continue
+
+        if not val:
+            if default:
+                return default
+            continue
+
+        # Clean the typed value
+        cleaned = _clean_input(val)
+        if cleaned:
+            # Show verification for long keys
+            if len(cleaned) > 20:
+                masked = cleaned[:8] + "..." + cleaned[-4:]
+                console.print(f"  [dim]Captured: [cyan]{masked}[/] ({len(cleaned)} chars)[/]")
+            return cleaned
 
 
 def _list_models(base_url: str, api_key: str) -> tuple[bool, list[str], str]:
@@ -196,15 +263,15 @@ def _add_provider(config: HelixConfig) -> None:
     custom_name = _input(f"  Name for this provider [{name}]: ", name)
     name = custom_name or name
 
-    # Base URL
+    # Base URL — clean it (remove trailing whitespace, ensure no \r)
     if default_url:
-        base_url = _input(f"  Base URL [{default_url}]: ", default_url)
+        base_url = _clean_input(_input(f"  Base URL [{default_url}]: ", default_url))
     else:
-        base_url = _input("  Base URL (blank for OpenAI default): ")
+        base_url = _clean_input(_input("  Base URL (blank for OpenAI default): "))
         if not base_url:
             base_url = None
 
-    api_key = _input("  API key (paste here): ")
+    api_key = _input_secret("  API key:")
     if not api_key:
         console.print("[yellow]⚠ No API key. You can add it later.[/]")
 
