@@ -128,7 +128,11 @@ class PhoneUiScreenshot(Tool):
     name = "phone_ui_screenshot"
     description = (
         "Take a screenshot of the phone screen. Saves PNG to HELIX_HOME/screenshots/. "
-        "Returns the local file path. The agent can then read it via file_read (with VLM)."
+        "Returns the local file path.\n\n"
+        "IMPORTANT: Do NOT try to file_read the screenshot — PNGs are binary and "
+        "file_read will refuse. To understand what's on screen, use phone_ui_dump "
+        "instead (returns the UI hierarchy as XML text you can read). "
+        "Screenshots are mainly for the user's reference, not for the agent to analyze."
     )
     parameters = {
         "type": "object",

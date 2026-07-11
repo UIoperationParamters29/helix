@@ -41,7 +41,11 @@ def _is_safe(p: Path, home: Path) -> bool:
 @tool
 class FileRead(Tool):
     name = "file_read"
-    description = "Read a file's contents. Supports text files. For binary, returns base64."
+    description = (
+        "Read a text file's contents. Refuses binary files (images, audio, "
+        "compressed, executable). For images, use a vision-capable LLM or "
+        "describe the screenshot path instead of reading it."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -60,6 +64,32 @@ class FileRead(Tool):
             return ToolResult.err(f"File not found: {p}")
         if not p.is_file():
             return ToolResult.err(f"Not a file: {p}")
+
+        # BINARY DETECTION: read first 8KB and check for null bytes / common magic bytes.
+        # This prevents the LLM from getting PNG/JPEG/garbage in its context window.
+        try:
+            with open(p, "rb") as f:
+                head = f.read(8192)
+            if b"\x00" in head:
+                # Binary file — refuse to read as text
+                suffix = p.suffix.lower()
+                if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+                    return ToolResult.err(
+                        f"Binary image file ({suffix}). Cannot read as text. "
+                        f"The screenshot is saved at: {p}\n"
+                        f"To understand the screenshot, describe what you expect to see "
+                        f"based on prior UI actions, or use phone_ui_dump to get the UI "
+                        f"hierarchy as XML (which IS text-readable)."
+                    )
+                if suffix in (".apk", ".dex", ".so", ".bin", ".dat"):
+                    return ToolResult.err(f"Binary file ({suffix}, {p.stat().st_size} bytes). Cannot read as text.")
+                return ToolResult.err(
+                    f"Binary file ({p.stat().st_size} bytes). Cannot read as text. "
+                    f"If this is an image, use phone_ui_dump instead to get the UI hierarchy as XML."
+                )
+        except Exception as e:
+            return ToolResult.err(f"Read failed: {e}")
+
         try:
             text = p.read_text(encoding="utf-8", errors="replace")
             lines = text.splitlines()

@@ -24,12 +24,22 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def ok(cls, output: str, **metadata) -> "ToolResult":
-        return cls(output=output, is_error=False, metadata=metadata)
+    def ok(cls, *args, **kwargs) -> "ToolResult":
+        """Create a success result.
+
+        Usage: ToolResult.ok("output text", key1=val1, key2=val2)
+        The first positional arg is the output text. Any kwargs go into metadata.
+        If 'output' is passed as a kwarg, it's ignored (use positional).
+        """
+        output = args[0] if args else kwargs.pop("output", "")
+        kwargs.pop("output", None)  # drop any stray output kwarg
+        return cls(output=output, is_error=False, metadata=kwargs)
 
     @classmethod
-    def err(cls, output: str, **metadata) -> "ToolResult":
-        return cls(output=output, is_error=True, metadata=metadata)
+    def err(cls, *args, **kwargs) -> "ToolResult":
+        output = args[0] if args else kwargs.pop("output", "")
+        kwargs.pop("output", None)
+        return cls(output=output, is_error=True, metadata=kwargs)
 
 
 class Tool(ABC):

@@ -46,7 +46,7 @@ class PhoneAppLaunch(Tool):
         code, out = await _adb(cmd, timeout=15)
         if code != 0:
             return ToolResult.err(f"Launch failed: {out}")
-        return ToolResult.ok(f"Launched: {target}", target=target, output=out)
+        return ToolResult.ok(f"Launched: {target}\nadb output: {out}", target=target, adb_output=out)
 
 
 @tool

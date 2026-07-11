@@ -58,8 +58,19 @@ def _render_assistant(content: str) -> None:
 
 async def tui_main(config: HelixConfig) -> None:
     """Run the interactive TUI."""
+    import signal, asyncio
     from ..memory.manager import init_memory_files
     init_memory_files(config.home, config.persona)
+
+    # Install SIGINT handler so Ctrl+C works even during blocking input().
+    # Without this, Ctrl+C only fires after Enter is pressed (because input()
+    # blocks the event loop from processing signals).
+    def _sigint_handler(signum, frame):
+        raise KeyboardInterrupt
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+    except (ValueError, OSError):
+        pass  # not in main thread
 
     conv = Conversation(config=config)
 
