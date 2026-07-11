@@ -1,8 +1,9 @@
 'use client';
 
-import { Settings, Cpu, Smartphone, AlertCircle, ExternalLink, Copy, Check, Key } from 'lucide-react';
+import { Settings, Cpu, Smartphone, AlertCircle, ExternalLink, Copy, Check, Key, Zap } from 'lucide-react';
 import { useState } from 'react';
 import { useHelix } from '@/lib/store';
+import { TestConnectionButton } from './TestConnectionButton';
 
 export function SettingsView() {
   const status = useHelix((s) => s.status);
@@ -21,13 +22,15 @@ export function SettingsView() {
   // Snippet for the user's most likely config
   const setupSnippet = status?.on_termux
     ? `# In Termux (add to ~/.bashrc):
-export HELIX_BASE_URL=https://api.gateway.orgn.com
+# NOTE: most gateways need the /v1 suffix!
+export HELIX_BASE_URL=https://api.gateway.orgn.com/v1
 export HELIX_API_KEY=YOUR_KEY_HERE
 export HELIX_MODEL=gpt-4o-mini   # or whatever your gateway serves
 
 helix web`
     : `# On PC (add to ~/.bashrc or ~/.zshrc):
-export HELIX_BASE_URL=https://api.gateway.orgn.com
+# NOTE: most gateways need the /v1 suffix!
+export HELIX_BASE_URL=https://api.gateway.orgn.com/v1
 export HELIX_API_KEY=YOUR_KEY_HERE
 export HELIX_MODEL=gpt-4o-mini
 
@@ -47,6 +50,19 @@ helix web`;
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4 max-w-2xl">
+        {/* Test connection — always first so users can debug */}
+        <div className="card p-4 border-l-2 border-l-helix-blue/40">
+          <div className="flex items-center gap-2 mb-3">
+            <Zap size={14} className="text-helix-blue" />
+            <span className="font-medium text-sm">Test LLM connection</span>
+          </div>
+          <div className="text-xs text-helix-text-dim mb-3">
+            Sends a tiny "OK" request to verify your provider/model/key/base_url work.
+            If responses come back empty in chat, run this — it shows the real error.
+          </div>
+          <TestConnectionButton />
+        </div>
+
         {/* Quick setup */}
         <div className="card p-4 border-l-2 border-l-helix-blue/40">
           <div className="flex items-center gap-2 mb-3">

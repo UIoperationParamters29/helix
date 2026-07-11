@@ -150,6 +150,96 @@ def create_app(config: HelixConfig | None = None) -> FastAPI:
                 pass
         return {"type": "dir", "path": str(p), "items": items}
 
+    @app.post("/api/test_llm")
+    async def test_llm():
+        """Make a tiny test request to verify LLM config works.
+
+        Returns the actual URL being hit, status, response, and a hint
+        for the most common errors. Use this to debug 'empty response' issues.
+        """
+        from ...llm import get_llm
+        # Reload config from disk + env to pick up latest changes
+        fresh_cfg = HelixConfig.load()
+        result = {
+            "config": {
+                "provider": fresh_cfg.provider,
+                "model": fresh_cfg.model,
+                "base_url": fresh_cfg.base_url,
+                "api_key_set": bool(fresh_cfg.api_key),
+                "api_key_prefix": (fresh_cfg.api_key[:8] + "...") if fresh_cfg.api_key else None,
+            },
+        }
+        try:
+            llm = get_llm(fresh_cfg)
+            # Try a minimal completion with NO tools (rules out tool-schema issues)
+            resp = await llm.complete(
+                messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+                tools=None,
+                system="You are a test. Reply with OK.",
+            )
+            result["ok"] = resp.finish_reason != "error"
+            result["finish_reason"] = resp.finish_reason
+            result["content"] = resp.content
+            result["usage"] = resp.usage
+            if resp.finish_reason == "error" and isinstance(resp.raw, dict):
+                result["error"] = resp.raw.get("error", "")
+                result["status"] = resp.raw.get("status")
+                result["url"] = resp.raw.get("url", "")
+                result["hint"] = resp.raw.get("hint", "")
+            elif hasattr(llm, "client") and hasattr(llm.client, "base_url"):
+                result["url"] = f"{llm.client.base_url}chat/completions"
+            return result
+        except Exception as e:
+            result["ok"] = False
+            result["error"] = f"{type(e).__name__}: {e}"
+            return result
+
+    @app.get("/api/list_models")
+    async def list_models():
+        """Query the gateway's /v1/models endpoint to see what model names are valid.
+
+        Useful when the user gets 'model not found' errors. Returns the list of
+        model IDs the gateway says it supports.
+        """
+        import httpx
+        fresh_cfg = HelixConfig.load()
+        if not fresh_cfg.base_url:
+            return {"ok": False, "error": "No base_url set. Set HELIX_BASE_URL first."}
+        url = fresh_cfg.base_url.rstrip("/") + "/models"
+        headers = {"Authorization": f"Bearer {fresh_cfg.api_key}"} if fresh_cfg.api_key else {}
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(url, headers=headers)
+            if r.status_code >= 400:
+                return {
+                    "ok": False,
+                    "url": url,
+                    "status": r.status_code,
+                    "error": r.text[:500],
+                }
+            data = r.json()
+            # OpenAI format: {"data": [{"id": "gpt-4o-mini", ...}, ...]}
+            models = []
+            if isinstance(data, dict) and "data" in data:
+                for m in data["data"]:
+                    if isinstance(m, dict) and "id" in m:
+                        models.append(m["id"])
+            elif isinstance(data, list):
+                for m in data:
+                    if isinstance(m, dict) and "id" in m:
+                        models.append(m["id"])
+                    elif isinstance(m, str):
+                        models.append(m)
+            return {
+                "ok": True,
+                "url": url,
+                "status": r.status_code,
+                "models": sorted(models),
+                "count": len(models),
+            }
+        except Exception as e:
+            return {"ok": False, "url": url, "error": f"{type(e).__name__}: {e}"}
+
     # --- WebSocket: streaming chat ---
 
     @app.websocket("/ws/chat")

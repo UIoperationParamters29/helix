@@ -193,9 +193,32 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
             try:
                 resp = await self.llm.complete(messages=messages, tools=self._tool_schemas, system=system)
             except Exception as e:
-                err = AgentErrorEvent(message=str(e))
+                err = AgentErrorEvent(message=f"LLM call raised: {type(e).__name__}: {e}")
                 self.append(err)
                 yield err
+                finish = FinishEvent(reason="error")
+                self.append(finish)
+                yield finish
+                return
+
+            # Check for LLM-level errors (provider returned an error response)
+            if resp.finish_reason == "error":
+                err_detail = ""
+                if isinstance(resp.raw, dict) and "error" in resp.raw:
+                    err_detail = str(resp.raw["error"])
+                elif resp.content:
+                    err_detail = resp.content
+                else:
+                    err_detail = "Unknown LLM error (no detail returned)"
+                err = AgentErrorEvent(
+                    message=f"LLM error: {err_detail}",
+                    traceback=err_detail,
+                )
+                self.append(err)
+                yield err
+                finish = FinishEvent(reason="error")
+                self.append(finish)
+                yield finish
                 return
 
             # If assistant wants to call tools

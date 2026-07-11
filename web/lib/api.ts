@@ -32,6 +32,25 @@ export const HelixAPI = {
   session: (id: string) => api<{ id: string; events: unknown[] }>(`/api/sessions/${id}`),
   newSession: () => api<{ session_id: string }>('/api/sessions/new', { method: 'POST' }),
   files: (path = '.') => api<{ type: string; path?: string; content?: string; items?: unknown[] }>(`/api/files?path=${encodeURIComponent(path)}`),
+  testLlm: () => api<{
+    ok: boolean;
+    config: { provider: string; model: string; base_url: string | null; api_key_set: boolean; api_key_prefix?: string };
+    content?: string;
+    finish_reason?: string;
+    error?: string;
+    status?: number;
+    url?: string;
+    hint?: string;
+    usage?: Record<string, number>;
+  }>('/api/test_llm', { method: 'POST' }),
+  listModels: () => api<{
+    ok: boolean;
+    url?: string;
+    status?: number;
+    models?: string[];
+    count?: number;
+    error?: string;
+  }>('/api/list_models'),
 };
 
 // WebSocket URL
