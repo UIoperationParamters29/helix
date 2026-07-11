@@ -142,10 +142,22 @@ async def chat_loop(config: HelixConfig):
 
 # ─── Click commands ──────────────────────────────────────────────────────
 
-@click.group()
-def cli():
-    """HELIX — self-improving agent harness."""
-    pass
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """HELIX — self-improving agent harness.
+
+    Run 'helix' with no arguments to launch the TUI.
+    Run 'helix --help' to see all commands.
+    """
+    if ctx.invoked_subcommand is None:
+        # No subcommand → launch TUI
+        config = HelixConfig.load()
+        from .tui import tui_main
+        try:
+            asyncio.run(tui_main(config))
+        except KeyboardInterrupt:
+            pass
 
 
 @cli.command()
@@ -241,6 +253,20 @@ def status():
         f"[dim]Tools:[/]     {len(all_tools(config))} registered",
         border_style="blue",
     ))
+
+
+@cli.command()
+def model():
+    """Switch model/provider interactively (like Hermes 'hermes model').
+
+    Shows current model, lists saved providers, lets you add new providers,
+    pick models from the gateway, and test connections.
+    """
+    from .model_switcher import run_model_switcher
+    try:
+        run_model_switcher()
+    except KeyboardInterrupt:
+        print("\nAborted.")
 
 
 @cli.command()

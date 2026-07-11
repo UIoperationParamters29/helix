@@ -180,6 +180,7 @@ def _handle_slash(cmd: str, arg: str, config: HelixConfig, conv: Conversation) -
     elif cmd == "help":
         console.print("  [bold]Commands:[/]")
         console.print("    [cyan]/help[/]     this help")
+        console.print("    [cyan]/model[/]    switch model/provider (interactive)")
         console.print("    [cyan]/skills[/]   list skills")
         console.print("    [cyan]/memory[/]   show memory")
         console.print("    [cyan]/tools[/]    list tools")
@@ -187,6 +188,20 @@ def _handle_slash(cmd: str, arg: str, config: HelixConfig, conv: Conversation) -
         console.print("    [cyan]/models[/]   list gateway models")
         console.print("    [cyan]/status[/]   show config")
         console.print("    [cyan]/exit[/]     quit (or Ctrl+C)")
+    elif cmd == "model":
+        # Launch the model switcher
+        from .model_switcher import run_model_switcher
+        run_model_switcher()
+        # After switching, update the conversation's config
+        from ..config import HelixConfig
+        new_config = HelixConfig.load()
+        config.provider = new_config.provider
+        config.model = new_config.model
+        config.api_key = new_config.api_key
+        config.base_url = new_config.base_url
+        console.print(f"  [green]✓ Switched to: {config.model}[/]")
+        console.print("  [dim]Note: new conversation will use this model.[/]")
+        console.print("  [dim]Restart HELIX (Ctrl+C + rerun) for full effect.[/]")
     elif cmd == "skills":
         skills = load_skill_summaries(config.home)
         if not skills:

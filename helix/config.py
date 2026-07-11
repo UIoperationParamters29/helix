@@ -45,6 +45,12 @@ class HelixConfig:
     max_tokens: int = 8096
     temperature: float = 0.3
 
+    # --- Saved providers (for `helix model` switcher) ---
+    # Each entry: {name, base_url, api_key, provider_type}
+    # The active provider/model/api_key/base_url above is what's actually used.
+    # This list lets you switch between saved providers quickly.
+    saved_providers: list[dict] = field(default_factory=list)
+
     # --- Agent loop ---
     max_iterations: int = 30            # hard cap on tool-call rounds per turn
     max_context_tokens: int = 100_000   # condense when exceeded
