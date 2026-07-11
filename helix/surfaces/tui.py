@@ -1,30 +1,15 @@
 """HELIX TUI — interactive terminal interface.
 
-Design: NOT a full-screen alternate-screen app (those break input() in most terminals).
-Instead: a scrolling chat with rich formatting, streaming text, slash commands,
-and a status line before each prompt. Like Hermes's classic CLI, enhanced.
-
-Features:
-  - Streaming: assistant text appears token-by-token
-  - Compact colored tool calls (↳ tool_name(args))
-  - Status line before each prompt (model/iter/tools)
-  - Slash commands: /help /skills /memory /tools /sessions /new /exit
-  - Markdown rendering for assistant responses
-  - Error surfacing (never silent empty responses)
+Scrolling chat (not full-screen) with streaming text, slash commands,
+and compact status. Ctrl+C exits cleanly.
 """
 from __future__ import annotations
 
-import asyncio, sys, os, shlex
-from typing import Optional
-
+import asyncio
 from rich.console import Console
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.live import Live
-from rich.spinner import Spinner
-from rich.align import Align
-from rich.console import Group
 
 from ..config import HelixConfig
 from ..conversation import Conversation
@@ -36,39 +21,36 @@ from ..tools import all_tools
 from ..skills.loader import load_skill_summaries
 from ..memory.manager import load_memory
 
-
 console = Console()
 
 
-def _fmt_args(args: dict, max_len: int = 100) -> str:
-    """Compact arg formatting."""
+def _fmt_args(args: dict, max_len: int = 80) -> str:
     parts = []
     for k, v in args.items():
-        if isinstance(v, str):
-            vs = v if len(v) <= 60 else v[:57] + "..."
-        else:
-            vs = repr(v)
-            if len(vs) > 60:
-                vs = vs[:57] + "..."
+        vs = v if isinstance(v, str) and len(v) <= 50 else (repr(v) if not isinstance(v, str) else v[:47] + "...")
+        if isinstance(vs, str) and len(vs) > 50:
+            vs = vs[:47] + "..."
         parts.append(f"{k}={vs}")
     s = ", ".join(parts)
     return s[:max_len] + "..." if len(s) > max_len else s
 
 
-def _status_line(config: HelixConfig, conv: Conversation, iter_count: int = 0) -> str:
-    """One-line status shown before the input prompt."""
-    tools_n = len(all_tools(config))
-    on_phone = "📱" if config.on_termux else "💻"
-    # Shorten model name
-    model = config.model
-    if len(model) > 25:
-        model = model[:22] + "..."
-    base = config.base_url or "(default)"
-    # Show if key is set
-    key_status = "🔑" if config.api_key else "⚠️nokey"
-    return (f"[dim]{on_phone}[/] [cyan]{config.provider}[/]/[cyan]{model}[/] "
-            f"[dim]🔧{tools_n}[/] [dim]iter {iter_count}/{config.max_iterations}[/] "
-            f"[dim]{key_status}[/] [dim]session:{conv.session_id[:8]}[/]")
+def _render_assistant(content: str) -> None:
+    """Render assistant message as markdown, indented."""
+    if not content.strip():
+        console.print("  [dim](empty response)[/]")
+        return
+    console.print("  [bold blue]HELIX:[/]")
+    try:
+        from io import StringIO
+        buf = StringIO()
+        sub = Console(file=buf, force_terminal=True, color_system="auto")
+        sub.print(Markdown(content))
+        for line in buf.getvalue().splitlines():
+            console.print(f"  {line}")
+    except Exception:
+        for line in content.splitlines():
+            console.print(f"  [white]{line}[/]")
 
 
 async def tui_main(config: HelixConfig) -> None:
@@ -78,33 +60,27 @@ async def tui_main(config: HelixConfig) -> None:
 
     conv = Conversation(config=config)
 
-    # Compact banner — key info only, aligned
+    # Compact banner
     console.print()
     console.print("  [bold blue]HELIX[/] [dim]v0.1.0[/]")
-    console.print(f"  [dim]─────────────────────────────────────────────[/]")
-    console.print(f"  [dim]Model:[/]    [cyan]{config.model}[/]")
-    console.print(f"  [dim]URL:[/]      {config.base_url or '(provider default)'}")
-    console.print(f"  [dim]API key:[/]  {'✓ set' if config.api_key else '[red]✗ NOT SET[/]'}")
+    console.print(f"  [dim]Model:[/] [cyan]{config.model}[/]  [dim]URL:[/] {config.base_url or '(default)'}")
+    console.print(f"  [dim]Key:[/] {'✓' if config.api_key else '[red]✗ NOT SET[/]'}  "
+                  f"[dim]Tools:[/] {len(all_tools(config))}  "
+                  f"[dim]Session:[/] {conv.session_id[:12]}")
     if config.on_termux:
-        console.print(f"  [dim]Platform:[/] [magenta]Termux (Android)[/]")
-    console.print(f"  [dim]Tools:[/]    {len(all_tools(config))} registered")
-    console.print(f"  [dim]Session:[/]  {conv.session_id[:16]}")
-    console.print(f"  [dim]─────────────────────────────────────────────[/]")
-    console.print(f"  [dim]Type [bold]/help[/] for commands · [bold]/exit[/] to quit[/]")
+        console.print("  [magenta]📱 Termux[/]")
+    console.print("  [dim]Type /help for commands · Ctrl+C to quit[/]")
     console.print()
 
-    # Warn if no API key
     if not config.api_key:
-        console.print("  [bold red]⚠ No API key set![/]\n"
-                      "  Set it with: [cyan]export HELIX_API_KEY=your_key[/]\n"
-                      "  Then run:    [cyan]helix tui[/]\n")
+        console.print("  [bold red]⚠ No API key![/]  [cyan]export HELIX_API_KEY=your_key[/]\n")
 
     iter_count = 0
 
     while True:
-        # Compact status line + prompt
+        # Status + prompt
         try:
-            console.print(_status_line(config, conv, iter_count))
+            console.print(f"  [dim]iter {iter_count}/{config.max_iterations} · session {conv.session_id[:8]}[/]")
             user_input = console.input("[bold cyan]›[/] ")
         except (EOFError, KeyboardInterrupt):
             console.print("\n  [dim]Bye.[/]")
@@ -114,17 +90,16 @@ async def tui_main(config: HelixConfig) -> None:
         if not user_input:
             continue
 
-        # --- Slash commands ---
+        # Slash commands
         if user_input.startswith("/"):
-            cmd_parts = user_input[1:].split()
-            cmd = cmd_parts[0].lower() if cmd_parts else ""
-            arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
-            should_exit = _handle_slash(cmd, arg, config, conv)
-            if should_exit:
+            parts = user_input[1:].split()
+            cmd = parts[0].lower() if parts else ""
+            arg = " ".join(parts[1:]) if len(parts) > 1 else ""
+            if _handle_slash(cmd, arg, config, conv):
                 return
             continue
 
-        # --- Send to agent with streaming ---
+        # Send to agent
         iter_count = 0
         streaming_text = ""
         streaming_active = False
@@ -133,34 +108,22 @@ async def tui_main(config: HelixConfig) -> None:
             async for event in conv.send_streaming(user_input):
                 if isinstance(event, MessageEvent):
                     if event.role == "user":
-                        console.print(Text.assemble(
-                            ("  You", "bold cyan"),
-                            (": ", "dim"),
-                            (event.content, "white"),
-                        ))
+                        console.print(f"  [bold cyan]You:[/] {event.content}")
                     elif event.role == "assistant":
-                        if not streaming_active:
-                            streaming_active = True
-                            streaming_text = event.content
-                        else:
-                            streaming_text = event.content
+                        streaming_active = True
+                        streaming_text = event.content
                 elif isinstance(event, ActionEvent):
-                    # Finalize streaming text first
                     if streaming_active and streaming_text:
                         _render_assistant(streaming_text)
                         streaming_text = ""
                         streaming_active = False
                     iter_count += 1
-                    args_str = _fmt_args(event.args)
-                    console.print(Text.assemble(
-                        ("  [", "dim"),
-                        (str(iter_count), "dim"),
-                        ("] ", "dim"),
-                        ("↳ ", "dim"),
-                        (event.tool, "bold yellow"),
-                        (f"({args_str})", "yellow"),
-                    ))
+                    console.print(f"  [dim][{iter_count}][/dim] [bold yellow]↳ {event.tool}[/]([yellow]{_fmt_args(event.args)}[/])")
                 elif isinstance(event, ObservationEvent):
+                    if streaming_active and streaming_text:
+                        _render_assistant(streaming_text)
+                        streaming_text = ""
+                        streaming_active = False
                     icon = "✗" if event.is_error else "✓"
                     color = "red" if event.is_error else "green"
                     output = event.output.strip()
@@ -168,18 +131,15 @@ async def tui_main(config: HelixConfig) -> None:
                         output = output[:200] + f"\n      …(+{len(output)-400} chars)" + output[-200:]
                     lines = output.splitlines()
                     if len(lines) > 5:
-                        output = "\n".join(lines[:4]) + f"\n      …(+{len(lines)-4} more lines)"
+                        output = "\n".join(lines[:4]) + f"\n      …(+{len(lines)-4} more)"
                     for line in output.splitlines():
-                        console.print(Text(f"      {icon} {line}", style=color))
+                        console.print(f"      [ {icon} ] {line}", style=color)
                 elif isinstance(event, AgentErrorEvent):
                     if streaming_active and streaming_text:
                         _render_assistant(streaming_text)
                         streaming_text = ""
                         streaming_active = False
-                    console.print(Text.assemble(
-                        ("  ✗ ", "bold red"),
-                        (event.message[:500], "red"),
-                    ))
+                    console.print(f"  [bold red]✗[/] [red]{event.message[:400]}[/]")
                 elif isinstance(event, FinishEvent):
                     if streaming_active and streaming_text:
                         _render_assistant(streaming_text)
@@ -187,146 +147,100 @@ async def tui_main(config: HelixConfig) -> None:
                         streaming_active = False
                     if event.reason != "completed":
                         console.print(f"  [dim]finished: {event.reason}[/]")
+        except KeyboardInterrupt:
+            console.print("\n  [yellow]⚠ Interrupted.[/]")
+            if streaming_active and streaming_text:
+                _render_assistant(streaming_text)
         except Exception as e:
             if streaming_active and streaming_text:
                 _render_assistant(streaming_text)
-            console.print(f"  [bold red]✗ Fatal error:[/] {type(e).__name__}: {e}")
+            console.print(f"  [bold red]✗ Fatal:[/] {type(e).__name__}: {e}")
 
         console.print()  # blank line between turns
-
-
-def _render_assistant(content: str) -> None:
-    """Render an assistant message as markdown with proper indentation."""
-    if not content.strip():
-        console.print("  [dim](empty response)[/]")
-        return
-    console.print(Text.assemble(("  HELIX", "bold blue"), (":", "dim")))
-    try:
-        # Render markdown with 2-space indent prefix
-        from rich.console import Group
-        from rich.text import Text as RText
-        md = Markdown(content)
-        # Print each line with indent
-        from io import StringIO
-        buf = StringIO()
-        sub_console = Console(file=buf, force_terminal=True, color_system="auto")
-        sub_console.print(md)
-        for line in buf.getvalue().splitlines():
-            console.print(f"  {line}")
-    except Exception:
-        # Fallback: plain text with indent
-        for line in content.splitlines():
-            console.print(f"  [white]{line}[/]")
 
 
 def _handle_slash(cmd: str, arg: str, config: HelixConfig, conv: Conversation) -> bool:
     """Handle slash command. Returns True if should exit."""
     if cmd in ("exit", "quit"):
-        console.print("[dim]Bye.[/]")
         return True
     elif cmd == "help":
-        console.print(Panel(
-            "[bold]Commands:[/]\n"
-            "  [cyan]/help[/]        show this help\n"
-            "  [cyan]/skills[/]      list all skills\n"
-            "  [cyan]/memory[/]      show memory files\n"
-            "  [cyan]/tools[/]       list all tools\n"
-            "  [cyan]/sessions[/]    list past sessions\n"
-            "  [cyan]/status[/]      show current config\n"
-            "  [cyan]/test[/]        test LLM connection\n"
-            "  [cyan]/models[/]      list models on gateway\n"
-            "  [cyan]/exit[/]        quit HELIX",
-            title="Help", border_style="blue"))
+        console.print("  [bold]Commands:[/]")
+        console.print("    [cyan]/help[/]     this help")
+        console.print("    [cyan]/skills[/]   list skills")
+        console.print("    [cyan]/memory[/]   show memory")
+        console.print("    [cyan]/tools[/]    list tools")
+        console.print("    [cyan]/test[/]     test LLM connection")
+        console.print("    [cyan]/models[/]   list gateway models")
+        console.print("    [cyan]/status[/]   show config")
+        console.print("    [cyan]/exit[/]     quit (or Ctrl+C)")
     elif cmd == "skills":
         skills = load_skill_summaries(config.home)
         if not skills:
-            console.print("[dim](no skills yet — agent creates them after tasks)[/]")
+            console.print("  [dim](no skills yet — agent creates them after tasks)[/]")
         for s in skills:
-            console.print(f"  [bold green]{s['name']}[/]: {s['description']}")
+            console.print(f"  [green]{s['name']}[/]: {s['description']}")
     elif cmd == "memory":
         mem = load_memory(config.home)
         for kind in ("IDENTITY", "USER", "MEMORY"):
             if kind in mem:
                 console.print(Panel(mem[kind], title=kind, border_style="magenta"))
     elif cmd == "tools":
-        tools = all_tools(config)
-        for t in tools:
+        for t in all_tools(config):
             danger = " [red]⚠[/]" if t.dangerous else ""
-            ro = " [green]ro[/]" if t.read_only else ""
-            console.print(f"  [bold yellow]{t.name}[/]{danger}{ro} — {t.description[:80]}")
-    elif cmd == "sessions":
-        sd = config.home / "sessions"
-        for f in sorted(sd.glob("*.jsonl")):
-            console.print(f"  {f.stem}")
+            console.print(f"  [yellow]{t.name}[/]{danger} — {t.description[:70]}")
     elif cmd == "status":
-        console.print(Panel.fit(
-            f"[bold]HELIX Status[/]\n\n"
-            f"[dim]Home:[/]     {config.home}\n"
-            f"[dim]Provider:[/] {config.provider}\n"
-            f"[dim]Model:[/]    {config.model}\n"
-            f"[dim]Base URL:[/] {config.base_url or '(provider default)'}\n"
-            f"[dim]API key:[/]  {'✓ set' if config.api_key else '[red]✗ NOT SET[/]'}\n"
-            f"[dim]On Termux:[/] {config.on_termux}\n"
-            f"[dim]Tools:[/]    {len(all_tools(config))} registered\n"
-            f"[dim]Session:[/]  {conv.session_id}",
-            border_style="blue"))
+        console.print(f"  [dim]Model:[/] [cyan]{config.model}[/]")
+        console.print(f"  [dim]URL:[/] {config.base_url or '(default)'}")
+        console.print(f"  [dim]Key:[/] {'✓' if config.api_key else '[red]✗[/]'}")
+        console.print(f"  [dim]Tools:[/] {len(all_tools(config))}")
+        console.print(f"  [dim]Session:[/] {conv.session_id}")
     elif cmd == "test":
         _run_test(config)
     elif cmd == "models":
-        _run_list_models(config)
-    elif cmd == "new":
-        console.print("[dim]Start a new session by exiting (Ctrl+C or /exit) and running 'helix tui' again.[/]")
+        _run_list_models(config, arg)
     else:
-        console.print(f"[red]Unknown command: /{cmd}[/] (try /help)")
+        console.print(f"  [red]Unknown: /{cmd}[/] (try /help)")
     return False
 
 
 def _run_test(config: HelixConfig) -> None:
-    """Test LLM connection — same as /api/test_llm in the web UI."""
+    """Test LLM connection."""
     from ..llm import get_llm
-    console.print(f"[dim]Testing {config.provider}/{config.model} at {config.base_url or '(default)'}...[/]")
+    console.print(f"  [dim]Testing {config.model}...[/]")
     try:
         llm = get_llm(config)
-        import asyncio
+
         async def _do():
             return await llm.complete(
                 messages=[{"role": "user", "content": "Reply with exactly: OK"}],
-                tools=None,
-                system="You are a test. Reply with OK.",
+                tools=None, system="Reply with OK.",
             )
         resp = asyncio.run(_do())
         if resp.finish_reason == "error":
-            console.print(f"[bold red]✗ Failed[/]")
+            console.print(f"  [bold red]✗ Failed[/]")
             if isinstance(resp.raw, dict):
-                console.print(f"  [red]Error:[/] {resp.raw.get('error', '')[:400]}")
-                if resp.raw.get("status"):
-                    console.print(f"  [dim]HTTP status:[/] {resp.raw['status']}")
-                if resp.raw.get("url"):
-                    console.print(f"  [dim]URL:[/] {resp.raw['url']}")
+                console.print(f"  [red]{resp.raw.get('error', '')[:300]}[/]")
                 if resp.raw.get("hint"):
                     console.print(f"  [blue]Hint:[/] {resp.raw['hint']}")
         else:
-            console.print(f"[bold green]✓ Works![/]  Model replied: [cyan]{resp.content}[/]")
-            if resp.usage:
-                console.print(f"  [dim]Tokens:[/] {resp.usage}")
+            console.print(f"  [bold green]✓ Works![/] Replied: [cyan]{resp.content}[/]")
     except Exception as e:
-        console.print(f"[bold red]✗ Error:[/] {type(e).__name__}: {e}")
+        console.print(f"  [bold red]✗[/] {type(e).__name__}: {e}")
 
 
-def _run_list_models(config: HelixConfig) -> None:
-    """List models on the gateway."""
+def _run_list_models(config: HelixConfig, filter_str: str = "") -> None:
+    """List models on gateway."""
     import httpx
     if not config.base_url:
-        console.print("[red]No base_url set. Set HELIX_BASE_URL first.[/]")
+        console.print("  [red]No base_url set.[/]")
         return
     url = config.base_url.rstrip("/") + "/models"
-    console.print(f"[dim]Fetching {url}...[/]")
+    console.print(f"  [dim]Fetching {url}...[/]")
     try:
         headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
         r = httpx.get(url, headers=headers, timeout=15)
         if r.status_code >= 400:
-            console.print(f"[red]✗ HTTP {r.status_code}[/]")
-            console.print(f"  {r.text[:400]}")
+            console.print(f"  [red]✗ HTTP {r.status_code}[/]")
             return
         data = r.json()
         models = []
@@ -334,24 +248,14 @@ def _run_list_models(config: HelixConfig) -> None:
             for m in data["data"]:
                 if isinstance(m, dict) and "id" in m:
                     models.append(m["id"])
-        elif isinstance(data, list):
-            for m in data:
-                if isinstance(m, dict) and "id" in m:
-                    models.append(m["id"])
-                elif isinstance(m, str):
-                    models.append(m)
         models.sort()
-        console.print(f"[green]✓ {len(models)} models on your gateway:[/]")
-        if arg_filter := "":
-            for m in models:
-                console.print(f"  [yellow]{m}[/]")
-        # Print in columns
-        if len(models) > 20:
-            console.print(f"  [dim](showing first 30, use /models <filter> to narrow)[/]")
-            for m in models[:30]:
-                console.print(f"  [yellow]{m}[/]")
-        else:
-            for m in models:
-                console.print(f"  [yellow]{m}[/]")
+        if filter_str:
+            models = [m for m in models if filter_str.lower() in m.lower()]
+        console.print(f"  [green]✓ {len(models)} models[/]")
+        for m in models[:30]:
+            marker = " [green]← current[/]" if m == config.model else ""
+            console.print(f"    [yellow]{m}[/]{marker}")
+        if len(models) > 30:
+            console.print(f"    [dim]...and {len(models) - 30} more[/]")
     except Exception as e:
-        console.print(f"[red]✗ Error:[/] {type(e).__name__}: {e}")
+        console.print(f"  [red]✗[/] {e}")
