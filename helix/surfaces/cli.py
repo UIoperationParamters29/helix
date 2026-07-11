@@ -377,7 +377,7 @@ def doctor():
                     tools=None,
                     system="You are a test. Reply with OK.",
                 )
-            resp = asyncio.get_event_loop().run_until_complete(_test())
+            resp = asyncio.run(_test())
             if resp.finish_reason == "error":
                 console.print(f"   [bold red]✗ LLM test failed[/]")
                 if isinstance(resp.raw, dict):
@@ -453,6 +453,115 @@ def config_show():
         val = os.environ.get(var)
         if val:
             console.print(f"  [green]{var}={val[:20]}{'...' if len(val)>20 else ''}[/]")
+
+
+@cli.command()
+def adb():
+    """Set up self-ADB pairing for phone UI control (tap, swipe, type, screenshot).
+
+    This lets HELIX control your phone's screen — tap buttons, type text,
+    take screenshots, launch apps. Works WITHOUT root.
+
+    Prerequisites:
+      - Android 11+
+      - Termux with android-tools installed (pkg install android-tools)
+      - Wireless debugging enabled in Developer Options
+
+    Run this command and follow the prompts. It will guide you through
+    pairing your phone to itself via wireless ADB.
+    """
+    import shutil, subprocess, os
+    console.print(Panel.fit(
+        "[bold]HELIX Self-ADB Setup[/]\n"
+        "[dim]Pair your phone to itself for full UI control[/]",
+        border_style="blue",
+    ))
+
+    # Check if we're on Termux
+    config = HelixConfig.load()
+    if not config.on_termux:
+        console.print("[yellow]⚠ Not running on Termux.[/]")
+        console.print("  Self-ADB pairing is for Android phones running HELIX in Termux.")
+        console.print("  On PC, you can still control a phone via USB ADB:")
+        console.print("    1. Install platform-tools: https://developer.android.com/tools/releases/platform-tools")
+        console.print("    2. Enable USB debugging on your phone")
+        console.print("    3. Connect via USB")
+        console.print("    4. Run: adb devices")
+        console.print()
+        console.print("  To run the pairing script anyway (if you're on Termux but detection failed):")
+        script = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "setup_adb.sh")
+        console.print(f"    bash {os.path.abspath(script)}")
+        return
+
+    # Check if adb is installed
+    if not shutil.which("adb"):
+        console.print("[yellow]⚠ adb not found. Installing android-tools...[/]")
+        os.system("pkg install -y android-tools")
+
+    if not shutil.which("adb"):
+        console.print("[red]✗ Failed to install android-tools. Run: pkg install android-tools[/]")
+        return
+
+    console.print("[green]✓ adb is available[/]")
+    console.print()
+    console.print("[bold]Step 1: Enable Wireless debugging[/]")
+    console.print("  1. Go to Settings → About Phone")
+    console.print("  2. Tap 'Build Number' 7 times to enable Developer Options")
+    console.print("  3. Go to Settings → Developer Options")
+    console.print("  4. Enable 'Wireless debugging'")
+    console.print()
+    input("  Press Enter when Wireless debugging is ON...")
+
+    console.print()
+    console.print("[bold]Step 2: Pair your device[/]")
+    console.print("  In Wireless debugging settings, tap 'Pair device with pairing code'.")
+    console.print("  You'll see an IP:port (e.g. 192.168.1.42:37123) and a 6-digit code.")
+    console.print()
+    pair_addr = input("  Enter the pairing IP:port (e.g. 192.168.1.42:37123): ").strip()
+    if not pair_addr:
+        console.print("[red]No address entered. Aborting.[/]")
+        return
+    pair_code = input("  Enter the 6-digit pairing code: ").strip()
+    if not pair_code:
+        console.print("[red]No code entered. Aborting.[/]")
+        return
+
+    console.print()
+    console.print(f"[dim]Pairing with {pair_addr}...[/]")
+    ret = os.system(f"adb pair {pair_addr} <<< '{pair_code}'")
+    if ret != 0:
+        console.print(f"[red]✗ Pairing failed (exit {ret}).[/]")
+        console.print("  Make sure you're on the same WiFi and the pairing screen is still open.")
+        return
+
+    console.print()
+    console.print("[bold]Step 3: Connect[/]")
+    console.print("  Go back to the main Wireless debugging screen.")
+    console.print("  Note the IP:port shown under your device name (different from pairing port).")
+    console.print()
+    conn_addr = input("  Enter the connection IP:port (e.g. 192.168.1.42:41234): ").strip()
+    if not conn_addr:
+        console.print("[red]No address entered. Aborting.[/]")
+        return
+
+    console.print(f"[dim]Connecting to {conn_addr}...[/]")
+    ret = os.system(f"adb connect {conn_addr}")
+    if ret != 0:
+        console.print(f"[red]✗ Connection failed.[/]")
+        return
+
+    console.print()
+    console.print("[dim]Verifying...[/]")
+    os.system("adb devices")
+
+    # Save to config
+    console.print()
+    console.print(f"[green]✓ Self-ADB paired![/]")
+    console.print("  HELIX can now control your phone's UI.")
+    console.print("  Try in chat: 'take a screenshot' or 'tap the center of the screen'")
+    console.print()
+    console.print(f"  [dim]Note: ADB pairing expires after phone reboot.[/]")
+    console.print(f"  [dim]Re-run 'helix adb' to re-pair.[/]")
 
 
 def main():

@@ -245,6 +245,7 @@ def create_app(config: HelixConfig | None = None) -> FastAPI:
     @app.websocket("/ws/chat")
     async def ws_chat(ws: WebSocket):
         await ws.accept()
+        conv = None
         try:
             # First message: session setup
             hello = await ws.receive_json()
@@ -252,28 +253,27 @@ def create_app(config: HelixConfig | None = None) -> FastAPI:
             conv = get_or_create_session(session_id)
             await ws.send_json({"type": "session_ready", "session_id": conv.session_id})
 
-            # Register listener to push events to ws
-            queue: asyncio.Queue = asyncio.Queue()
-
-            def listener(event: Event):
-                try:
-                    queue.put_nowait({
-                        "type": event.type,
-                        "data": event.model_dump(),
-                    })
-                except Exception:
-                    pass
-
-            conv.add_listener(listener)
-
             while True:
                 msg = await ws.receive_json()
                 if msg.get("type") == "send":
                     user_text = msg.get("content", "").strip()
                     if not user_text:
                         continue
-                    # Run the agent loop, events stream via listener
-                    asyncio.create_task(_run_conversation(conv, user_text, queue, ws))
+                    # Run the agent loop and send each event directly to the WebSocket
+                    try:
+                        async for event in conv.send(user_text):
+                            await ws.send_json({
+                                "type": event.type,
+                                "data": event.model_dump(),
+                            })
+                        await ws.send_json({"type": "done"})
+                    except Exception as e:
+                        import traceback
+                        await ws.send_json({
+                            "type": "error",
+                            "message": f"{type(e).__name__}: {e}",
+                            "traceback": traceback.format_exc(),
+                        })
                 elif msg.get("type") == "approval":
                     action_id = msg.get("action_id", "")
                     decision = msg.get("decision", "denied")
@@ -286,15 +286,6 @@ def create_app(config: HelixConfig | None = None) -> FastAPI:
                 await ws.send_json({"type": "error", "message": str(e)})
             except Exception:
                 pass
-
-    async def _run_conversation(conv: Conversation, user_text: str, queue: asyncio.Queue, ws: WebSocket):
-        try:
-            async for event in conv.send(user_text):
-                # Events are pushed by listener; nothing to do here
-                pass
-            await ws.send_json({"type": "done"})
-        except Exception as e:
-            await ws.send_json({"type": "error", "message": str(e)})
 
     # --- Static frontend (built Next.js) ---
     web_dist = Path(__file__).parent.parent.parent.parent / "web" / "out"

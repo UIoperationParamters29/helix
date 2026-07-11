@@ -78,33 +78,36 @@ async def tui_main(config: HelixConfig) -> None:
 
     conv = Conversation(config=config)
 
-    # Banner
-    console.print(Panel.fit(
-        f"[bold blue]HELIX[/] [dim]v0.1.0[/]\n"
-        f"[dim]Provider:[/] [cyan]{config.provider}[/]  [dim]Model:[/] [cyan]{config.model}[/]\n"
-        f"[dim]Base URL:[/] {config.base_url or '(provider default)'}\n"
-        f"[dim]API key:[/] {'✓ set' if config.api_key else '[red]✗ NOT SET[/]'}\n"
-        f"[dim]Home:[/] {config.home}\n"
-        f"[dim]Tools:[/] {len(all_tools(config))} registered  [dim]Termux:[/] {'yes' if config.on_termux else 'no'}\n"
-        f"[dim]Type [bold]/help[/] for commands, [bold]/exit[/] to quit.[/]",
-        border_style="blue",
-    ))
+    # Compact banner — key info only, aligned
+    console.print()
+    console.print("  [bold blue]HELIX[/] [dim]v0.1.0[/]")
+    console.print(f"  [dim]─────────────────────────────────────────────[/]")
+    console.print(f"  [dim]Model:[/]    [cyan]{config.model}[/]")
+    console.print(f"  [dim]URL:[/]      {config.base_url or '(provider default)'}")
+    console.print(f"  [dim]API key:[/]  {'✓ set' if config.api_key else '[red]✗ NOT SET[/]'}")
+    if config.on_termux:
+        console.print(f"  [dim]Platform:[/] [magenta]Termux (Android)[/]")
+    console.print(f"  [dim]Tools:[/]    {len(all_tools(config))} registered")
+    console.print(f"  [dim]Session:[/]  {conv.session_id[:16]}")
+    console.print(f"  [dim]─────────────────────────────────────────────[/]")
+    console.print(f"  [dim]Type [bold]/help[/] for commands · [bold]/exit[/] to quit[/]")
+    console.print()
 
     # Warn if no API key
     if not config.api_key:
-        console.print("[bold red]⚠ No API key set![/]  Set it with:\n"
-                      "  [cyan]export HELIX_API_KEY=your_key[/]\n"
-                      "  [cyan]helix tui[/]\n")
+        console.print("  [bold red]⚠ No API key set![/]\n"
+                      "  Set it with: [cyan]export HELIX_API_KEY=your_key[/]\n"
+                      "  Then run:    [cyan]helix tui[/]\n")
 
     iter_count = 0
 
     while True:
-        # Status line + prompt
-        console.print(_status_line(config, conv, iter_count))
+        # Compact status line + prompt
         try:
+            console.print(_status_line(config, conv, iter_count))
             user_input = console.input("[bold cyan]›[/] ")
         except (EOFError, KeyboardInterrupt):
-            console.print("\n[dim]Bye.[/]")
+            console.print("\n  [dim]Bye.[/]")
             return
 
         user_input = user_input.strip()
@@ -113,8 +116,9 @@ async def tui_main(config: HelixConfig) -> None:
 
         # --- Slash commands ---
         if user_input.startswith("/"):
-            cmd = user_input[1:].split()[0].lower() if user_input[1:].split() else ""
-            arg = user_input[1:].split(maxsplit=1)[1] if len(user_input[1:].split(maxsplit=1)) > 1 else ""
+            cmd_parts = user_input[1:].split()
+            cmd = cmd_parts[0].lower() if cmd_parts else ""
+            arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
             should_exit = _handle_slash(cmd, arg, config, conv)
             if should_exit:
                 return
@@ -130,7 +134,7 @@ async def tui_main(config: HelixConfig) -> None:
                 if isinstance(event, MessageEvent):
                     if event.role == "user":
                         console.print(Text.assemble(
-                            ("You", "bold cyan"),
+                            ("  You", "bold cyan"),
                             (": ", "dim"),
                             (event.content, "white"),
                         ))
@@ -140,10 +144,8 @@ async def tui_main(config: HelixConfig) -> None:
                             streaming_text = event.content
                         else:
                             streaming_text = event.content
-                        # We'll render the final version on finish or before a tool call
-                        # (rendering every token is too flickery in non-screen mode)
                 elif isinstance(event, ActionEvent):
-                    # Finalize streaming text
+                    # Finalize streaming text first
                     if streaming_active and streaming_text:
                         _render_assistant(streaming_text)
                         streaming_text = ""
@@ -151,7 +153,10 @@ async def tui_main(config: HelixConfig) -> None:
                     iter_count += 1
                     args_str = _fmt_args(event.args)
                     console.print(Text.assemble(
-                        ("  ↳ ", "dim"),
+                        ("  [", "dim"),
+                        (str(iter_count), "dim"),
+                        ("] ", "dim"),
+                        ("↳ ", "dim"),
                         (event.tool, "bold yellow"),
                         (f"({args_str})", "yellow"),
                     ))
@@ -159,13 +164,13 @@ async def tui_main(config: HelixConfig) -> None:
                     icon = "✗" if event.is_error else "✓"
                     color = "red" if event.is_error else "green"
                     output = event.output.strip()
-                    if len(output) > 500:
-                        output = output[:250] + f"\n  …(+{len(output)-500} chars)" + output[-250:]
+                    if len(output) > 400:
+                        output = output[:200] + f"\n      …(+{len(output)-400} chars)" + output[-200:]
                     lines = output.splitlines()
-                    if len(lines) > 6:
-                        output = "\n".join(lines[:5]) + f"\n  …(+{len(lines)-5} more lines)"
+                    if len(lines) > 5:
+                        output = "\n".join(lines[:4]) + f"\n      …(+{len(lines)-4} more lines)"
                     for line in output.splitlines():
-                        console.print(Text(f"    {icon} {line}", style=color))
+                        console.print(Text(f"      {icon} {line}", style=color))
                 elif isinstance(event, AgentErrorEvent):
                     if streaming_active and streaming_text:
                         _render_assistant(streaming_text)
@@ -191,15 +196,27 @@ async def tui_main(config: HelixConfig) -> None:
 
 
 def _render_assistant(content: str) -> None:
-    """Render an assistant message as markdown."""
+    """Render an assistant message as markdown with proper indentation."""
     if not content.strip():
         console.print("  [dim](empty response)[/]")
         return
-    console.print(Text.assemble(("HELIX", "bold blue"), (":", "dim")))
+    console.print(Text.assemble(("  HELIX", "bold blue"), (":", "dim")))
     try:
-        console.print(Markdown(content))
+        # Render markdown with 2-space indent prefix
+        from rich.console import Group
+        from rich.text import Text as RText
+        md = Markdown(content)
+        # Print each line with indent
+        from io import StringIO
+        buf = StringIO()
+        sub_console = Console(file=buf, force_terminal=True, color_system="auto")
+        sub_console.print(md)
+        for line in buf.getvalue().splitlines():
+            console.print(f"  {line}")
     except Exception:
-        console.print(Text(content, "white"))
+        # Fallback: plain text with indent
+        for line in content.splitlines():
+            console.print(f"  [white]{line}[/]")
 
 
 def _handle_slash(cmd: str, arg: str, config: HelixConfig, conv: Conversation) -> bool:
@@ -277,7 +294,7 @@ def _run_test(config: HelixConfig) -> None:
                 tools=None,
                 system="You are a test. Reply with OK.",
             )
-        resp = asyncio.get_event_loop().run_until_complete(_do())
+        resp = asyncio.run(_do())
         if resp.finish_reason == "error":
             console.print(f"[bold red]✗ Failed[/]")
             if isinstance(resp.raw, dict):
