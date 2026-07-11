@@ -179,6 +179,10 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
         Yields events as they happen. Caller can listen + render.
         """
         from .text_utils import clean_for_llm, strip_ansi
+        from .notifications import start_task_notification, update_task_notification, end_task_notification
+
+        # Start ongoing notification on Termux
+        await start_task_notification(f"Processing: {user_text[:80]}")
 
         # Append user message
         user_evt = MessageEvent(role="user", content=user_text)
@@ -245,6 +249,9 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                     yield action
                     messages.append(action.to_message())
 
+                    # Update ongoing notification with current tool
+                    await update_task_notification(f"[{iteration+1}] {tc['name']}...")
+
                     # Execute
                     result = await self.executor.execute(tc["name"], tc.get("args", {}))
                     # CRITICAL: strip ANSI/Rich color codes from tool output before
@@ -275,6 +282,7 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                 finish = FinishEvent(reason="completed")
                 self.append(finish)
                 yield finish
+                await end_task_notification(cleaned_content[:80] if cleaned_content else "Done")
                 return
 
         # Hit iteration cap
@@ -284,6 +292,7 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
         finish = FinishEvent(reason="max_iterations")
         self.append(finish)
         yield finish
+        await end_task_notification("Hit max iterations")
 
     def _events_to_messages(self) -> list[dict]:
         """Convert event log to LLM message format. Skips system + condensation events."""

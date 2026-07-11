@@ -68,29 +68,63 @@ export function ChatView() {
     }
   }, [messages, pendingToolCalls]);
 
-  // WebSocket setup
+  // WebSocket setup with AUTO-RECONNECT
+  // When the tab is backgrounded (user switches to another app), the browser
+  // closes the WebSocket. We auto-reconnect when the tab comes back.
   useEffect(() => {
     if (!sessionId) return;
-    const ws = new WebSocket(wsUrl());
-    wsRef.current = ws;
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'hello', session_id: sessionId }));
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempts = 0;
+    let shouldReconnect = true;
+
+    function connect() {
+      ws = new WebSocket(wsUrl());
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectAttempts = 0;
+        setError(null);
+        ws!.send(JSON.stringify({ type: 'hello', session_id: sessionId }));
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          handleWsMessage(msg);
+        } catch (e) {
+          console.error('bad ws message', e);
+        }
+      };
+
+      ws.onerror = () => {
+        // Don't set error here — onclose will handle reconnect
+      };
+
+      ws.onclose = () => {
+        wsRef.current = null;
+        if (shouldReconnect) {
+          reconnectAttempts++;
+          const delay = Math.min(1000 * reconnectAttempts, 5000); // 1s, 2s, 3s... max 5s
+          setError(`Connection lost — reconnecting in ${delay/1000}s... (attempt ${reconnectAttempts})`);
+          reconnectTimer = setTimeout(() => {
+            if (shouldReconnect) connect();
+          }, delay);
+        } else {
+          setError('WebSocket closed');
+        }
+      };
+    }
+
+    connect();
+
+    // Cleanup on unmount
+    return () => {
+      shouldReconnect = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
     };
-
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        handleWsMessage(msg);
-      } catch (e) {
-        console.error('bad ws message', e);
-      }
-    };
-
-    ws.onerror = () => setError('WebSocket error');
-    ws.onclose = () => setError('WebSocket closed — backend may have restarted');
-
-    return () => ws.close();
     // eslint-disable-next-line
   }, [sessionId]);
 

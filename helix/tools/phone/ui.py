@@ -175,7 +175,9 @@ class PhoneUiDump(Tool):
     description = (
         "Dump the current screen's UI hierarchy as XML. "
         "Reveals all visible elements with their bounds, text, content-desc. "
-        "Use this to find what to tap. Saved to HELIX_HOME/ui_dumps/."
+        "Use this to find what to tap. "
+        "TIP: Filter the output mentally — look for clickable nodes with text/content-desc. "
+        "Don't call this more than necessary; it takes ~1-2 seconds each time."
     )
     parameters = {"type": "object", "properties": {}}
     read_only = True
@@ -184,25 +186,44 @@ class PhoneUiDump(Tool):
     async def run(self) -> ToolResult:
         if not adb_available():
             return no_adb_error(self.name)
-        device_path = f"/sdcard/helix_ui_{int(time.time())}.xml"
-        code, out = await _adb(f"uiautomator dump {device_path}", timeout=15)
-        if code != 0:
-            return ToolResult.err(f"UI dump failed: {out}")
-        # Pull and read
-        target = self.config.home / "ui_dumps" / f"ui_{int(time.time())}.xml"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        code, out = await run_cmd(f"adb pull {device_path} {target}", timeout=15)
-        if code != 0:
-            return ToolResult.err(f"Pull failed: {out}")
-        await _adb(f"rm {device_path}")
-        try:
-            xml = target.read_text(encoding="utf-8")
-        except Exception as e:
-            return ToolResult.err(f"Read failed: {e}")
+        # FAST PATH: uiautomator dump can write to /dev/tty or stdout on some
+        # Android versions, letting us skip the pull step entirely.
+        # Try: adb exec-out uiautomator dump /dev/tty  (reads directly)
+        code, out = await run_cmd("adb exec-out uiautomator dump /dev/tty 2>/dev/null", timeout=10)
+        xml = ""
+        if code == 0 and out.strip().startswith("<?xml") or (out and "<hierarchy" in out):
+            # Extract just the XML part (uiautomator may prepend a status line)
+            idx = out.find("<?xml")
+            if idx >= 0:
+                xml = out[idx:]
+            else:
+                idx = out.find("<hierarchy")
+                if idx >= 0:
+                    xml = out[idx:]
+            if not xml:
+                xml = out
+
+        if not xml:
+            # FALLBACK: old slow path (dump to file, pull, read, cleanup)
+            device_path = f"/sdcard/helix_ui_{int(time.time())}.xml"
+            code, out = await _adb(f"uiautomator dump {device_path}", timeout=15)
+            if code != 0:
+                return ToolResult.err(f"UI dump failed: {out}")
+            target = self.config.home / "ui_dumps" / f"ui_{int(time.time())}.xml"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            code, out = await run_cmd(f"adb pull {device_path} {target}", timeout=15)
+            if code != 0:
+                return ToolResult.err(f"Pull failed: {out}")
+            await _adb(f"rm {device_path}")
+            try:
+                xml = target.read_text(encoding="utf-8")
+            except Exception as e:
+                return ToolResult.err(f"Read failed: {e}")
+
         # Truncate if huge
         if len(xml) > 30000:
             xml = xml[:15000] + "\n[...truncated...]\n" + xml[-15000:]
-        return ToolResult.ok(xml, path=str(target))
+        return ToolResult.ok(xml, size=len(xml))
 
 
 @tool
