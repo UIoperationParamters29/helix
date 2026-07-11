@@ -605,6 +605,15 @@ def adb():
         console.print("[red]Aborted.[/]")
         return
 
+    # Validate: must look like IP:port (numbers.dots:numbers)
+    if not re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{4,5}$', pair_addr) \
+       and not re.match(r'^\[[0-9a-fA-F:]+\]:\d{4,5}$', pair_addr):
+        console.print(f"[red]✗ '{pair_addr}' doesn't look like an IP:port.[/]")
+        console.print("  Expected format: 192.168.1.42:37123")
+        console.print("  You probably typed something else by mistake.")
+        console.print("  [dim]Tip: type 'c' + Enter to paste from clipboard.[/]")
+        return
+
     pair_code = prompt_with_clipboard(
         "Enter the 6-digit pairing code",
         parse_code,
@@ -612,6 +621,12 @@ def adb():
     )
     if not pair_code:
         console.print("[red]Aborted.[/]")
+        return
+
+    # Validate: must be 6 digits
+    if not re.match(r'^\d{6}$', pair_code):
+        console.print(f"[red]✗ '{pair_code}' is not a valid 6-digit pairing code.[/]")
+        console.print("  The code is exactly 6 digits shown on the pairing screen.")
         return
 
     console.print()
@@ -630,8 +645,10 @@ def adb():
         # adb pair prints to stdout+stderr
         output = (proc.stdout or "") + (proc.stderr or "")
         console.print(f"  [dim]{output.strip()}[/]")
-        if proc.returncode != 0:
-            console.print(f"[red]✗ Pairing failed (exit {proc.returncode}).[/]")
+        # Check for actual success — adb pair prints "Successfully paired" on success
+        pairing_succeeded = "Successfully paired" in output or "successfully" in output.lower()
+        if proc.returncode != 0 or not pairing_succeeded:
+            console.print(f"[red]✗ Pairing failed.[/]")
             console.print("  Common causes:")
             console.print("    • Pairing dialog was closed (it times out in ~30s)")
             console.print("    • Wrong IP:port (use the PAIRING port, not the connection port)")
@@ -647,7 +664,7 @@ def adb():
         console.print(f"[red]✗ Error: {type(e).__name__}: {e}[/]")
         return
 
-    console.print(f"[green]✓ Paired![/]")
+    console.print(f"[green]✓ Paired successfully![/]")
     console.print()
 
     # --- Step 3: Connect ---
@@ -729,14 +746,22 @@ def adb():
         proc = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
         devices_output = proc.stdout.strip()
         console.print(f"  [dim]{devices_output}[/]")
-        # Check if any device shows as "device" (not offline/unauthorized)
+        # STRICT check: must have a line ending in "\tdevice" (not offline/unauthorized/empty)
+        # The "List of devices attached" header contains "device" so we must check actual device lines.
         lines = devices_output.splitlines()
-        connected = False
+        connected_devices = []
         for line in lines[1:]:  # skip "List of devices attached"
-            if "\tdevice" in line:
-                connected = True
-                break
-        if connected:
+            line = line.strip()
+            if not line:
+                continue
+            if line.endswith("\tdevice"):
+                connected_devices.append(line)
+            elif line.endswith("\toffline"):
+                connected_devices.append(line)
+            elif line.endswith("\tunauthorized"):
+                connected_devices.append(line)
+
+        if connected_devices and any(l.endswith("\tdevice") for l in connected_devices):
             console.print()
             console.print(Panel.fit(
                 "[bold green]✓ Self-ADB paired and connected![/]\n\n"
@@ -753,15 +778,31 @@ def adb():
                 "[dim]Re-run 'helix adb' to re-pair.[/]",
                 border_style="green",
             ))
+        elif any("unauthorized" in l for l in connected_devices):
+            console.print()
+            console.print("[bold red]✗ Device is unauthorized.[/]")
+            console.print("  Accept the 'Allow USB debugging?' dialog on your phone, then run:")
+            console.print("  [cyan]adb devices[/]")
+        elif any("offline" in l for l in connected_devices):
+            console.print()
+            console.print("[bold red]✗ Device is offline.[/]")
+            console.print("  Try disconnecting and reconnecting:")
+            console.print("  [cyan]adb disconnect[/]")
+            console.print(f"  [cyan]adb connect <ip:port>[/]  [dim](from the top of Wireless debugging screen)[/]")
         else:
-            console.print("[yellow]⚠ No device shows as 'device' in adb devices.[/]")
-            console.print("  Output above shows what adb sees.")
-            if "unauthorized" in devices_output:
-                console.print("  [dim]Device is unauthorized. Accept the 'Allow USB debugging?' dialog on your phone.[/]")
-            elif "offline" in devices_output:
-                console.print("  [dim]Device is offline. Try: adb disconnect && adb connect <ip:port>[/]")
-            else:
-                console.print("  [dim]No device found. Check that Wireless debugging is still ON.[/]")
+            console.print()
+            console.print("[bold red]✗ No device connected.[/]")
+            console.print("  adb devices shows no device. This means the connection failed.")
+            console.print()
+            console.print("  [bold]To fix:[/]")
+            console.print("  1. Make sure Wireless debugging is still ON")
+            console.print("  2. Look at the TOP of the Wireless debugging screen for 'IP address & port'")
+            console.print("  3. Run manually:")
+            console.print(f"     [cyan]adb connect <ip:port>[/]  [dim](e.g. adb connect 192.168.1.42:41234)[/]")
+            console.print("  4. Verify with: [cyan]adb devices[/]")
+            console.print("     You should see: [green]<ip:port>    device[/]")
+            console.print()
+            console.print("  [dim]The IP is the same as your pairing IP, only the port is different.[/]")
     except Exception as e:
         console.print(f"[red]✗ Verify error: {e}[/]")
 
