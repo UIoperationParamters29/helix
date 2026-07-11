@@ -99,6 +99,9 @@ class HelixConfig:
         for k, v in data.items():
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
+        # Ensure home is a Path (YAML loads it as string)
+        if isinstance(cfg.home, str):
+            cfg.home = Path(cfg.home).expanduser()
         # Apply env overrides (HELIX_ prefix)
         for k in ("provider", "model", "api_key", "base_url", "max_tokens",
                   "temperature", "max_iterations", "web_host", "web_port",

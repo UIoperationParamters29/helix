@@ -1,10 +1,10 @@
-"""HELIX model switcher — interactive provider + model picker.
+"""HELIX model switcher — interactive provider + model picker with arrow keys.
 
 Like Hermes's `hermes model` command:
   - Shows current model + provider
-  - Lists saved providers
+  - Lists saved providers (arrow-key navigation)
   - Add new provider (name, base_url, api_key)
-  - List models from gateway
+  - List models from gateway (arrow-key pick)
   - Select model → saves to config
 
 Run with: helix model
@@ -19,6 +19,7 @@ from rich.text import Text
 from rich.table import Table
 
 from ..config import HelixConfig
+from .selector import arrow_select, arrow_select_or_type
 
 console = Console()
 
@@ -84,12 +85,12 @@ def _test_model(base_url: str, api_key: str, model: str) -> tuple[bool, str]:
 
 
 def run_model_switcher() -> None:
-    """Interactive model/provider switcher."""
+    """Interactive model/provider switcher with arrow-key navigation."""
     config = HelixConfig.load()
 
     console.print(Panel.fit(
         "[bold]HELIX Model Switcher[/]\n"
-        "[dim]Switch providers, add API keys, pick models[/]",
+        "[dim]↑↓ to navigate · Enter to select · Ctrl+C to cancel[/]",
         border_style="blue",
     ))
 
@@ -104,173 +105,163 @@ def run_model_switcher() -> None:
         # Show saved providers
         if config.saved_providers:
             console.print(f"\n[bold]Saved providers ({len(config.saved_providers)}):[/]")
-            table = Table(show_header=False, box=None, padding=(0, 1))
-            table.add_column("idx", style="dim", width=4)
-            table.add_column("name", style="cyan")
-            table.add_column("base_url", style="dim")
-            table.add_column("model", style="green")
-            for i, p in enumerate(config.saved_providers, 1):
+            for i, p in enumerate(config.saved_providers):
                 is_active = (p.get("base_url") == config.base_url and
                             p.get("api_key") == config.api_key)
                 marker = " [green]← active[/]" if is_active else ""
-                table.add_row(
-                    f"{i}.",
-                    p.get("name", "?"),
-                    (p.get("base_url") or "(default)")[:50],
-                    p.get("model", "?") + marker,
-                )
-            console.print(table)
+                console.print(f"  [cyan]{i+1}.[/] {p.get('name', '?')} — {p.get('model', '?')}{marker}")
 
-        # Menu
-        console.print("\n[bold]Options:[/]")
-        console.print("  [cyan]1[/] Switch to a saved provider")
-        console.print("  [cyan]2[/] Add a new provider")
-        console.print("  [cyan]3[/] List models on current gateway + pick one")
-        console.print("  [cyan]4[/] Test current model")
-        console.print("  [cyan]5[/] Set model name manually")
-        console.print("  [cyan]6[/] Save & exit")
-        console.print("  [cyan]q[/] Quit without saving")
-        console.print()
-
-        choice = _input("Choice [1-6/q]: ").lower()
-
-        if choice == "q":
-            console.print("[dim]Exited without saving.[/]")
+        # Main menu — arrow select
+        options = [
+            "Switch to a saved provider",
+            "Add a new provider",
+            "List models on current gateway + pick one",
+            "Test current model",
+            "Set model name manually",
+            "Save & exit",
+            "Quit without saving",
+        ]
+        idx = arrow_select(options, "What do you want to do?")
+        if idx is None:
+            console.print("[dim]Exited.[/]")
             return
-        elif choice == "1":
+
+        if idx == 0:
             _switch_provider(config)
-        elif choice == "2":
+        elif idx == 1:
             _add_provider(config)
-        elif choice == "3":
+        elif idx == 2:
             _pick_model(config)
-        elif choice == "4":
+        elif idx == 3:
             _test_current(config)
-        elif choice == "5":
+        elif idx == 4:
             _set_model_manually(config)
-        elif choice == "6":
+        elif idx == 5:
             config.save()
             console.print(f"\n[green]✓ Saved to {config.home / 'config.yaml'}[/]")
             console.print(f"  [dim]Active model:[/] [cyan]{config.provider}/{config.model}[/]")
-            console.print(f"  [dim]Restart HELIX for changes to take effect.[/]")
             return
-        else:
-            console.print("[red]Invalid choice.[/]")
+        elif idx == 6:
+            console.print("[dim]Exited without saving.[/]")
+            return
 
 
 def _switch_provider(config: HelixConfig) -> None:
-    """Switch to a saved provider."""
+    """Switch to a saved provider using arrow keys."""
     if not config.saved_providers:
-        console.print("[yellow]No saved providers. Add one first (option 2).[/]")
-        return
-    try:
-        idx = int(_input(f"Provider number [1-{len(config.saved_providers)}]: "))
-        if idx < 1 or idx > len(config.saved_providers):
-            console.print("[red]Invalid number.[/]")
-            return
-    except ValueError:
-        console.print("[red]Invalid number.[/]")
+        console.print("[yellow]No saved providers. Add one first.[/]")
         return
 
-    p = config.saved_providers[idx - 1]
+    # Build option labels
+    options = []
+    for p in config.saved_providers:
+        is_active = (p.get("base_url") == config.base_url and
+                    p.get("api_key") == config.api_key)
+        marker = " ← active" if is_active else ""
+        options.append(f"{p.get('name', '?')} — {p.get('model', '?')} ({p.get('base_url', '?')[:40]}){marker}")
+
+    idx = arrow_select(options, "Pick a provider")
+    if idx is None:
+        return
+
+    p = config.saved_providers[idx]
     config.provider = p.get("provider_type", "openai")
     config.base_url = p.get("base_url")
     config.api_key = p.get("api_key", "")
     config.model = p.get("model", config.model)
-    console.print(f"[green]✓ Switched to {p.get('name')}[/]")
+    console.print(f"\n[green]✓ Switched to {p.get('name')}[/]")
     console.print(f"  [dim]Model:[/] [cyan]{config.model}[/]")
 
 
 def _add_provider(config: HelixConfig) -> None:
     """Add a new provider."""
     console.print("\n[bold cyan]Add a new provider[/]")
-    console.print("  [dim]Common presets: zai, openai, ollama, lmstudio[/]")
-    console.print("  [dim]Or type a custom name.[/]")
-    console.print()
 
-    name = _input("  Provider name (e.g. 'my-gateway'): ")
-    if not name:
-        console.print("[red]Name required.[/]")
+    # Pick provider type using arrow keys
+    presets = [
+        ("Custom gateway", "openai", "https://your-gateway.com/v1"),
+        ("Z.ai (GLM)", "zai", "https://open.bigmodel.cn/api/paas/v4"),
+        ("OpenAI", "openai", None),
+        ("Ollama (local)", "ollama", "http://localhost:11434/v1"),
+        ("LM Studio (local)", "lmstudio", "http://localhost:1234/v1"),
+    ]
+    preset_options = [f"{name}" for name, _, _ in presets]
+    idx = arrow_select(preset_options, "Pick provider type")
+    if idx is None:
         return
 
-    # Preset URLs
-    presets = {
-        "zai": ("https://open.bigmodel.cn/api/paas/v4", "zai"),
-        "openai": (None, "openai"),
-        "ollama": ("http://localhost:11434/v1", "ollama"),
-        "lmstudio": ("http://localhost:1234/v1", "lmstudio"),
-    }
-    if name.lower() in presets:
-        default_url, provider_type = presets[name.lower()]
-        base_url = _input(f"  Base URL [{default_url or '(OpenAI default)'}]: ", default_url or "")
-        config.provider = provider_type
-    else:
-        default_url = "https://your-gateway.com/v1"
+    name, provider_type, default_url = presets[idx]
+
+    # Custom name for the provider
+    custom_name = _input(f"  Name for this provider [{name}]: ", name)
+    name = custom_name or name
+
+    # Base URL
+    if default_url:
         base_url = _input(f"  Base URL [{default_url}]: ", default_url)
-        config.provider = "openai"  # most gateways are OpenAI-compatible
+    else:
+        base_url = _input("  Base URL (blank for OpenAI default): ")
+        if not base_url:
+            base_url = None
 
     api_key = _input("  API key (paste here): ")
     if not api_key:
-        console.print("[yellow]⚠ No API key set. You can add it later.[/]")
+        console.print("[yellow]⚠ No API key. You can add it later.[/]")
 
-    console.print(f"\n  [dim]Fetching models from {base_url or '(default)'}...[/]")
-    ok, models, err = _list_models(base_url, api_key)
-    if not ok:
-        console.print(f"  [red]✗ Failed to list models: {err}[/]")
-        console.print("  [dim]Provider saved anyway. You can set model manually.[/]")
+    # Fetch models
+    if base_url:
+        console.print(f"\n  [dim]Fetching models from {base_url}...[/]")
+        ok, models, err = _list_models(base_url, api_key)
+        if not ok:
+            console.print(f"  [red]✗ Failed: {err}[/]")
+            console.print("  [dim]Provider saved anyway. Set model manually.[/]")
+            models = []
+    else:
+        console.print("  [dim]No base_url — skipping model fetch.[/]")
         models = []
 
     selected_model = ""
     if models:
         console.print(f"\n  [green]✓ {len(models)} models available[/]")
-        # Show first 20
-        for i, m in enumerate(models[:20], 1):
-            console.print(f"    [cyan]{i:2}.[/] [yellow]{m}[/]")
-        if len(models) > 20:
-            console.print(f"    [dim]...and {len(models) - 20} more[/]")
-
-        console.print()
-        model_choice = _input(f"  Pick model number [1-{min(len(models), 20)}] or type name: ")
-        if model_choice.isdigit():
-            idx = int(model_choice)
-            if 1 <= idx <= min(len(models), 20):
-                selected_model = models[idx - 1]
-        if not selected_model and model_choice:
-            selected_model = model_choice
-        if not selected_model and models:
-            selected_model = models[0]
-            console.print(f"  [dim]Defaulting to first model: {selected_model}[/]")
-
-    if not selected_model:
+        # Use arrow_select_or_type for model picking
+        # Show first 30 + "type custom"
+        display_models = models[:50]
+        selected = arrow_select_or_type(display_models, "Pick a model", allow_custom=True)
+        if selected:
+            selected_model = selected
+        else:
+            selected_model = _input("  Model name: ")
+    else:
         selected_model = _input("  Model name (e.g. gpt-4o-mini): ")
 
-    # Save to saved_providers list
+    # Save
     provider_entry = {
         "name": name,
-        "provider_type": config.provider,
-        "base_url": base_url or None,
+        "provider_type": provider_type,
+        "base_url": base_url,
         "api_key": api_key,
         "model": selected_model,
     }
-    # Remove existing entry with same name
     config.saved_providers = [p for p in config.saved_providers if p.get("name") != name]
     config.saved_providers.append(provider_entry)
 
     # Set as active
-    config.base_url = base_url or None
+    config.provider = provider_type
+    config.base_url = base_url
     config.api_key = api_key
     config.model = selected_model
 
-    console.print(f"\n[green]✓ Added provider '{name}' and set as active.[/]")
+    console.print(f"\n[green]✓ Added '{name}' and set as active.[/]")
     console.print(f"  [dim]Model:[/] [cyan]{config.model}[/]")
 
 
 def _pick_model(config: HelixConfig) -> None:
-    """List models on current gateway and pick one."""
+    """List models on current gateway and pick one with arrow keys."""
     if not config.base_url:
-        console.print("[red]No base_url set. Add a provider first (option 2).[/]")
+        console.print("[red]No base_url set. Add a provider first.[/]")
         return
     if not config.api_key:
-        console.print("[red]No API key set. Add a provider first (option 2).[/]")
+        console.print("[red]No API key set. Add a provider first.[/]")
         return
 
     console.print(f"\n  [dim]Fetching models from {config.base_url}...[/]")
@@ -280,23 +271,23 @@ def _pick_model(config: HelixConfig) -> None:
         return
 
     console.print(f"  [green]✓ {len(models)} models[/]")
-    # Show with current model marked
-    for i, m in enumerate(models[:30], 1):
-        marker = " [green]← current[/]" if m == config.model else ""
-        console.print(f"    [cyan]{i:2}.[/] [yellow]{m}[/]{marker}")
-    if len(models) > 30:
-        console.print(f"    [dim]...and {len(models) - 30} more (type name to filter)[/]")
 
-    console.print()
-    choice = _input(f"  Pick number [1-{min(len(models), 30)}] or type model name: ")
-    if choice.isdigit():
-        idx = int(choice)
-        if 1 <= idx <= min(len(models), 30):
-            config.model = models[idx - 1]
-            console.print(f"\n[green]✓ Model set to: {config.model}[/]")
-            return
-    if choice:
-        config.model = choice
+    # Find current model index for default selection
+    default_idx = 0
+    if config.model in models:
+        default_idx = models.index(config.model)
+
+    # Show all models with arrow nav (prompt_toolkit handles scrolling)
+    # If too many, show first 50 + custom option
+    if len(models) > 50:
+        display = models[:50]
+        console.print(f"  [dim](showing first 50 — type custom for others)[/]")
+    else:
+        display = models
+
+    selected = arrow_select_or_type(display, "Pick a model", allow_custom=True)
+    if selected:
+        config.model = selected
         console.print(f"\n[green]✓ Model set to: {config.model}[/]")
     else:
         console.print("[dim]No change.[/]")
