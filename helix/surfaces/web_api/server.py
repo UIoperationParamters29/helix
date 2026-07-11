@@ -316,6 +316,32 @@ def create_app(config: HelixConfig | None = None) -> FastAPI:
 def run_server(config: HelixConfig | None = None):
     import uvicorn
     cfg = config or HelixConfig.load()
+
+    # Print active config on startup so user can immediately see if it's wrong
+    print("\n" + "=" * 60)
+    print("  HELIX starting up — active configuration:")
+    print("=" * 60)
+    print(f"  Provider:  {cfg.provider}")
+    print(f"  Model:     {cfg.model}")
+    print(f"  Base URL:  {cfg.base_url or '(provider default)'}")
+    print(f"  API key:   {'✓ set (' + cfg.api_key[:8] + '...)' if cfg.api_key else '✗ NOT SET'}")
+    print(f"  On Termux: {cfg.on_termux}")
+    print(f"  Home:      {cfg.home}")
+    print(f"  Tools:     {len(__import__('helix.tools', fromlist=['all_tools']).all_tools(cfg))} registered")
+    print("=" * 60)
+
+    # Warn about common issues
+    if not cfg.api_key:
+        print("\n  ⚠ WARNING: No API key set!")
+        print("    Set it with: export HELIX_API_KEY=your_key")
+    if cfg.base_url and not cfg.base_url.rstrip('/').endswith('/v1') and 'openai.com' not in (cfg.base_url or ''):
+        # Check if it might need /v1
+        if 'gateway' in (cfg.base_url or '').lower() or 'api.' in (cfg.base_url or '').lower():
+            print(f"\n  ⚠ WARNING: Your base_url doesn't end with /v1")
+            print(f"    Most gateways need it. Try: export HELIX_BASE_URL={cfg.base_url.rstrip('/')}/v1")
+    print(f"\n  Web UI:  http://localhost:{cfg.web_port}")
+    print(f"  API docs: http://localhost:{cfg.web_port}/docs")
+    print(f"  Test LLM: curl -X POST http://localhost:{cfg.web_port}/api/test_llm\n")
+
     app = create_app(cfg)
-    print(f"\n  HELIX web UI:  http://localhost:{cfg.web_port}\n")
     uvicorn.run(app, host=cfg.web_host, port=cfg.web_port, log_level="info")
