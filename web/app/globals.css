@@ -9,9 +9,23 @@
 html, body {
   background: #0a0e1a;
   color: #f1f5f9;
-  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  /* Futuristic font stack: Space Grotesk for everything, JetBrains Mono for code */
+  font-family: 'Space Grotesk', ui-sans-serif, system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
+  letter-spacing: -0.01em;
+}
+
+/* Monospace elements use JetBrains Mono — futuristic coding font */
+code, pre, .font-mono, input, textarea, select {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace !important;
+}
+
+/* Headings get a slightly tighter, more futuristic look */
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Space Grotesk', sans-serif;
+  letter-spacing: -0.02em;
+  font-weight: 600;
 }
 
 /* HELIX DNA gradient background */

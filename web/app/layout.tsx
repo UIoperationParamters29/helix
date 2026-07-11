@@ -15,6 +15,14 @@ export const metadata: Metadata = {
   },
 };
 
+// Load futuristic fonts: Space Grotesk for display, JetBrains Mono for code/mono
+const fontLink = (
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+  />
+);
+
 export const viewport: Viewport = {
   themeColor: '#0a0e1a',
   width: 'device-width',
@@ -27,6 +35,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
+      <head>{fontLink}</head>
       <body>
         <HelixProvider>
           <div className="flex h-screen w-screen overflow-hidden">

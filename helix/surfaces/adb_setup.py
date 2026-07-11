@@ -140,7 +140,11 @@ def run_adb_setup() -> None:
     console.print("    • IP address & port: [green]192.168.x.x:xxxxx[/]")
     console.print("    • Wi-Fi pairing code: [green]6 digits[/]")
     console.print()
-    console.print("  [yellow]💡 Copy each value → type 'c' here to paste.[/]")
+    console.print("  [bold yellow]⚠ IMPORTANT: Don't minimize the pairing dialog![/]")
+    console.print("  Android refreshes the code when the dialog is minimized.")
+    console.print("  Use split-screen (or copy both values before switching to Termux).")
+    console.print()
+    console.print("  [dim]Type 'c' + Enter to paste from clipboard.[/]")
     console.print()
 
     pair_addr = _prompt("Pairing IP:port", _parse_addr, "192.168.1.42:37123")
@@ -192,25 +196,25 @@ def run_adb_setup() -> None:
 
     # --- Check if already connected after pairing ---
     # After `adb pair` succeeds, the device is often ALREADY connected.
-    # No need for a separate "Step 3" in most cases.
-    console.print("[dim]Checking connection...[/]")
+    console.print("[bold]Checking if already connected...[/]")
     import time
-    time.sleep(1)  # give adb a moment
+    time.sleep(1)  # give adb a moment to register
     connected, devices_output = _check_adb_devices()
     console.print(f"  [dim]{devices_output}[/]")
 
     if connected:
+        console.print()
         _show_success()
         return
 
-    # --- Step 3: Manual connect (only if auto-connect didn't work) ---
+    # Not auto-connected — need manual step 3
     console.print()
     console.print("[bold cyan]Step 3: Connect[/]")
-    console.print("  Not auto-connected. Find the connection IP:port:")
-    console.print("  Look at the [bold]TOP[/] of the Wireless debugging screen")
-    console.print("  (NOT the 'Paired devices' list — that shows fingerprints)")
+    console.print("[yellow]Not auto-connected. Find the connection IP:port:[/]")
     console.print()
-    console.print("  [dim]The IP is the same as pairing IP, only the port is different.[/]")
+    console.print("  Look at the [bold]TOP[/] of the Wireless debugging screen.")
+    console.print("  (NOT the 'Paired devices' list — that shows fingerprints)")
+    console.print("  The IP is the same as pairing IP, only the port is different.")
     console.print()
 
     conn_addr = _prompt("Connection IP:port", _parse_addr, "192.168.1.42:41234")

@@ -199,6 +199,8 @@ export function ChatView() {
             {messages.map((m) => (
               <MessageBubble key={m.id} message={m} />
             ))}
+            {/* Only show CURRENTLY RUNNING tool calls in the pending area.
+                Completed ones are now attached to their message. */}
             {pendingList.length > 0 && (
               <div className="space-y-2">
                 {pendingList.map((tc) => (
@@ -206,7 +208,7 @@ export function ChatView() {
                 ))}
               </div>
             )}
-            {isStreaming && (
+            {isStreaming && pendingList.length === 0 && (
               <div className="flex items-center gap-2 text-xs text-helix-text-mute pl-2">
                 <span className="flex gap-1">
                   <span className="w-1.5 h-1.5 bg-helix-blue rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
@@ -351,7 +353,7 @@ function EmptyState({ onPick, apiKeySet }: { onPick: (p: string) => void; apiKey
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
   return (
-    <div className={cn('flex msg-enter', isUser ? 'justify-end' : 'justify-start')}>
+    <div className={cn('flex msg-enter flex-col', isUser ? 'items-end' : 'items-start')}>
       <div
         className={cn(
           'max-w-[85%] lg:max-w-[75%] rounded-2xl px-4 py-2.5',
@@ -375,6 +377,14 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           </div>
         )}
       </div>
+      {/* Render tool calls attached to this message INLINE */}
+      {message.toolCalls && message.toolCalls.length > 0 && (
+        <div className={cn('w-full max-w-[85%] lg:max-w-[75%] space-y-1.5 mt-1', isUser ? 'self-end' : 'self-start')}>
+          {message.toolCalls.map((tc) => (
+            <ToolCallCard key={tc.id} tc={tc} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -245,10 +245,15 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
 
                     # Execute
                     result = await self.executor.execute(tc["name"], tc.get("args", {}))
+                    # CRITICAL: strip ANSI/Rich color codes from tool output before
+                    # sending to LLM. Otherwise the LLM sees [36m, [0m etc. and
+                    # mimics them in its responses, producing garbage.
+                    from .text_utils import clean_for_llm
+                    cleaned_output = clean_for_llm(result.output)
                     obs = ObservationEvent(
                         action_id=action.id,
                         tool=tc["name"],
-                        output=result.output,
+                        output=cleaned_output,
                         is_error=result.is_error,
                         metadata=result.metadata,
                     )
@@ -260,7 +265,11 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                 continue
             else:
                 # No tool calls — assistant is done
-                msg = MessageEvent(role="assistant", content=resp.content or "")
+                # Also strip any ANSI from the assistant's own response (in case
+                # the LLM still tries to emit color codes)
+                from .text_utils import strip_ansi
+                cleaned_content = strip_ansi(resp.content or "")
+                msg = MessageEvent(role="assistant", content=cleaned_content)
                 self.append(msg)
                 yield msg
                 finish = FinishEvent(reason="completed")
@@ -385,10 +394,12 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                         messages.append(action.to_message())
 
                         result = await self.executor.execute(tc["name"], tc.get("args", {}))
+                        from .text_utils import clean_for_llm, strip_ansi
+                        cleaned_output = clean_for_llm(result.output)
                         obs = ObservationEvent(
                             action_id=action.id,
                             tool=tc["name"],
-                            output=result.output,
+                            output=cleaned_output,
                             is_error=result.is_error,
                             metadata=result.metadata,
                         )
@@ -398,7 +409,8 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                     continue
                 else:
                     # No tool calls — final assistant message
-                    msg = MessageEvent(role="assistant", content=collected_content or "")
+                    cleaned_content = strip_ansi(collected_content or "")
+                    msg = MessageEvent(role="assistant", content=cleaned_content)
                     self.append(msg)
                     yield msg
                     finish = FinishEvent(reason="completed")

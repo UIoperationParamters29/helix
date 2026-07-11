@@ -37,6 +37,9 @@ def _fmt_args(args: dict, max_len: int = 80) -> str:
 
 def _render_assistant(content: str) -> None:
     """Render assistant message as markdown, indented."""
+    # Strip any ANSI/Rich color codes that leaked from tool outputs
+    from ..text_utils import strip_ansi
+    content = strip_ansi(content)
     if not content.strip():
         console.print("  [dim](empty response)[/]")
         return

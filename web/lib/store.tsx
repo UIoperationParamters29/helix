@@ -22,6 +22,10 @@ export type ChatMessage = {
   toolCalls?: ToolCall[];
 };
 
+// Tool calls that are done (completed or errored) get moved from pendingToolCalls
+// to the message they belong to. This keeps the chat clean — only currently-running
+// tool calls show in the "pending" area.
+
 export type Session = {
   id: string;
   size: number;
@@ -108,7 +112,27 @@ export const useHelix = create<HelixState>((set, get) => ({
     set((s) => {
       const tc = s.pendingToolCalls[id];
       if (!tc) return {};
-      return { pendingToolCalls: { ...s.pendingToolCalls, [id]: { ...tc, ...patch } } };
+      const updated = { ...tc, ...patch };
+      // If the tool call is now done/error, move it to the last assistant message
+      // and remove from pending. This keeps the pending area clean — only
+      // currently-running tools show there.
+      if (updated.status === 'done' || updated.status === 'error') {
+        const messages = [...s.messages];
+        // Find the last assistant message to attach this tool call to
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === 'assistant' || messages[i].role === 'user') {
+            messages[i] = {
+              ...messages[i],
+              toolCalls: [...(messages[i].toolCalls || []), updated],
+            };
+            break;
+          }
+        }
+        const newPending = { ...s.pendingToolCalls };
+        delete newPending[id];
+        return { pendingToolCalls: newPending, messages };
+      }
+      return { pendingToolCalls: { ...s.pendingToolCalls, [id]: updated } };
     }),
   setSessions: (sessions) => set({ sessions }),
   setSkills: (skills) => set({ skills }),
