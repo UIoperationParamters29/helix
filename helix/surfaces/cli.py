@@ -651,44 +651,92 @@ def adb():
     console.print()
 
     # --- Step 3: Connect ---
+    # First, try to auto-connect. After pairing, adb often knows the device.
+    # The connection IP is the SAME as the pairing IP, just a different port.
+    # The connection port is shown at the TOP of the Wireless debugging screen.
     console.print("[bold cyan]Step 3: Connect[/]")
-    console.print("  Go BACK to the main Wireless debugging screen (not the pairing dialog).")
-    console.print("  You'll see your device name with an IP:port underneath — [bold]this is a DIFFERENT port[/].")
     console.print()
-    console.print("  [yellow]💡 Tip: This port is different from the pairing port.[/]")
-    console.print("     Long-press → Copy, then type 'c' at the prompt to paste.")
+    console.print("  [bold]Where to find the connection IP:port:[/]")
+    console.print("  Look at the [bold]TOP[/] of the Wireless debugging screen.")
+    console.print("  You'll see:")
+    console.print("    [green]IP address & port[/]")
+    console.print("    [green]192.168.x.x:xxxxx[/]   ← this is the connection address")
+    console.print()
+    console.print("  [yellow]NOT[/] the 'Paired devices' list below — that shows fingerprints.")
+    console.print("  The connection IP:port is at the [bold]very top[/] of the screen,")
+    console.print("  right under the 'Wireless debugging' toggle.")
+    console.print()
+    console.print("  [dim]The IP is the same as the pairing IP, only the port is different.[/]")
+    console.print("  [dim]Example: paired with 192.168.1.42:37123 → connect to 192.168.1.42:41234[/]")
     console.print()
 
-    conn_addr = prompt_with_clipboard(
-        "Enter the connection IP:port",
-        parse_addr,
-        "192.168.1.42:41234"
-    )
-    if not conn_addr:
-        console.print("[red]Aborted.[/]")
-        return
+    # Try auto-connect first using the pairing IP
+    # Extract just the IP from the pairing address
+    pair_ip = pair_addr.split(":")[0] if pair_addr else None
+    auto_connected = False
 
-    console.print(f"[dim]Connecting to {conn_addr}...[/]")
-    try:
-        proc = subprocess.run(
-            ["adb", "connect", conn_addr],
-            capture_output=True,
-            text=True,
-            timeout=15,
+    if pair_ip:
+        console.print(f"[dim]Trying to auto-connect using pairing IP {pair_ip}...[/]")
+        # Try 1: adb connect with just the IP (adb may know the port from pairing)
+        try:
+            proc = subprocess.run(
+                ["adb", "connect", pair_ip],
+                capture_output=True, text=True, timeout=10,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+            if "connected" in output.lower() and "failed" not in output.lower():
+                console.print(f"  [green]✓ Auto-connected![/]")
+                console.print(f"  [dim]{output.strip()}[/]")
+                auto_connected = True
+            else:
+                console.print(f"  [dim]Auto-connect didn't work. Will ask for the port.[/]")
+        except Exception:
+            pass
+
+    if not auto_connected:
+        console.print()
+        console.print("  [yellow]💡 Tip: Copy the IP:port from the top of the Wireless debugging screen.[/]")
+        console.print("     Long-press the IP:port text → Copy, then type 'c' here to paste.")
+        console.print()
+
+        conn_addr = prompt_with_clipboard(
+            "Enter the connection IP:port (from the TOP of the screen)",
+            parse_addr,
+            "192.168.1.42:41234"
         )
-        output = (proc.stdout or "") + (proc.stderr or "")
-        console.print(f"  [dim]{output.strip()}[/]")
-    except Exception as e:
-        console.print(f"[red]✗ Connection error: {e}[/]")
-        return
+        if not conn_addr:
+            console.print("[red]Aborted.[/]")
+            return
+
+        console.print(f"[dim]Connecting to {conn_addr}...[/]")
+        try:
+            proc = subprocess.run(
+                ["adb", "connect", conn_addr],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            output = (proc.stdout or "") + (proc.stderr or "")
+            console.print(f"  [dim]{output.strip()}[/]")
+        except Exception as e:
+            console.print(f"[red]✗ Connection error: {e}[/]")
+            return
 
     # --- Verify ---
     console.print()
     console.print("[dim]Verifying connection...[/]")
     try:
         proc = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=10)
-        console.print(f"  [dim]{proc.stdout.strip()}[/]")
-        if "device" in proc.stdout and "offline" not in proc.stdout and "unauthorized" not in proc.stdout:
+        devices_output = proc.stdout.strip()
+        console.print(f"  [dim]{devices_output}[/]")
+        # Check if any device shows as "device" (not offline/unauthorized)
+        lines = devices_output.splitlines()
+        connected = False
+        for line in lines[1:]:  # skip "List of devices attached"
+            if "\tdevice" in line:
+                connected = True
+                break
+        if connected:
             console.print()
             console.print(Panel.fit(
                 "[bold green]✓ Self-ADB paired and connected![/]\n\n"
@@ -706,8 +754,14 @@ def adb():
                 border_style="green",
             ))
         else:
-            console.print("[yellow]⚠ Device shows as offline or unauthorized.[/]")
-            console.print("  Accept the 'Allow USB debugging?' dialog on your phone if it appeared.")
+            console.print("[yellow]⚠ No device shows as 'device' in adb devices.[/]")
+            console.print("  Output above shows what adb sees.")
+            if "unauthorized" in devices_output:
+                console.print("  [dim]Device is unauthorized. Accept the 'Allow USB debugging?' dialog on your phone.[/]")
+            elif "offline" in devices_output:
+                console.print("  [dim]Device is offline. Try: adb disconnect && adb connect <ip:port>[/]")
+            else:
+                console.print("  [dim]No device found. Check that Wireless debugging is still ON.[/]")
     except Exception as e:
         console.print(f"[red]✗ Verify error: {e}[/]")
 
