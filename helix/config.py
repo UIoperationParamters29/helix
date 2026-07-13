@@ -52,7 +52,7 @@ class HelixConfig:
     saved_providers: list[dict] = field(default_factory=list)
 
     # --- Agent loop ---
-    max_iterations: int = 30            # hard cap on tool-call rounds per turn
+    max_iterations: int = 15            # hard cap on tool calls per task (was 30 — too many)
     max_context_tokens: int = 100_000   # condense when exceeded
     stuck_threshold: int = 3            # identical observations -> stuck
 

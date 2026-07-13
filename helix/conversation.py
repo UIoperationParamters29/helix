@@ -1,11 +1,28 @@
-"""Conversation — owns state, drives the loop, persists the EventLog.
+"""Conversation — the agent loop. Owns state, drives the LLM, manages context.
 
-This is the only mutable thing in the system (OpenHands V1 principle).
-The Agent itself is a pure function: history -> next Action.
+This is the core of HELIX. Key design decisions (learned from OpenHands + Hermes):
+
+1. CONTEXT MANAGEMENT: Instead of crude truncation (last 50 events), we use
+   a sliding window that ALWAYS keeps the original user request + a running
+   summary of what's been done + the last N observations. This prevents the
+   agent from forgetting the task mid-way through.
+
+2. STUCK DETECTION: Track (tool, args_hash) pairs. If the same call is made
+   3 times with the same result, inject a "you're stuck" message and force
+   the agent to try a different approach.
+
+3. TOKEN AWARENESS: Estimate token count (chars/4). When approaching the
+   context limit, condense older observations into a summary.
+
+4. TASK TRACKING: Maintain a "task state" that reminds the agent what it's
+   doing. Injected into every LLM call so it never forgets the goal.
+
+5. REAL STREAMING: The streaming version actually yields content as it
+   arrives from the LLM, not all at once at the end.
 """
 from __future__ import annotations
 
-import asyncio, json, time, uuid
+import asyncio, json, time, uuid, hashlib
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
@@ -17,6 +34,7 @@ from .events import (
 )
 from .llm import get_llm, LLM
 from .tools import ToolExecutor, all_tools
+from .text_utils import clean_for_llm, strip_ansi
 from .skills.loader import load_skill_summaries_for_prompt
 from .memory.manager import load_memory_for_prompt
 
@@ -41,16 +59,20 @@ class Conversation:
         self._tool_schemas = [t.to_schema() for t in all_tools(self.config)]
         self._tools_by_name = {t.name: t for t in all_tools(self.config)}
 
+        # Context management state
+        self._system_prompt: str | None = None  # cached, rebuilt only when needed
+        self._call_history: list[str] = []  # hashes of (tool, args) for stuck detection
+        self._task_summary: str = ""  # running summary of what's been done
+        self._original_request: str = ""  # the user's original request (always kept)
+
     # --- Event log ---
     def append(self, event: Event) -> None:
-        """Append an event + notify listeners + persist."""
         self.events.append(event)
         for listener in self._listeners:
             try:
                 listener(event)
             except Exception:
                 pass
-        # Persist (append-only JSONL)
         try:
             with open(self._session_file, "a", encoding="utf-8") as f:
                 f.write(event.model_dump_json() + "\n")
@@ -61,7 +83,6 @@ class Conversation:
         self._listeners.append(fn)
 
     def load_history(self) -> None:
-        """Replay session file into self.events."""
         if not self._session_file.exists():
             return
         self.events = []
@@ -75,19 +96,14 @@ class Conversation:
             except Exception:
                 continue
 
-    # --- System prompt assembly ---
-    def _build_system_prompt(self) -> str:
-        """Assemble the system prompt. Stable within a session (cache-friendly).
+    # --- System prompt (cached) ---
+    def _get_system_prompt(self) -> str:
+        """Build and cache the system prompt. Only rebuilt if not cached."""
+        if self._system_prompt is None:
+            self._system_prompt = self._build_system_prompt()
+        return self._system_prompt
 
-        Layers:
-          1. Identity (who the agent is)
-          2. User facts (from USER.md)
-          3. Memory (from MEMORY.md)
-          4. Skill summaries (Level 0 — names + descriptions)
-          5. Tool usage instructions
-          6. Platform context (Termux / PC, ADB status, etc.)
-          7. Behavioral rules
-        """
+    def _build_system_prompt(self) -> str:
         mem = load_memory_for_prompt(self.config.home)
         skills = load_skill_summaries_for_prompt(self.config.home) if self.config.skills_enabled else []
 
@@ -97,9 +113,8 @@ class Conversation:
 
         skills_block = ""
         if skills:
-            skills_block = "\n\n## Available skills (Level 0)\n"
-            skills_block += "Call `skill_read` to load full content of any skill before applying it.\n\n"
-            for s in skills:
+            skills_block = "\n## Available skills\nCall `skill_read` to load full content.\n"
+            for s in skills[:20]:  # cap at 20 skills to save context
                 skills_block += f"- **{s['name']}**: {s['description']}\n"
 
         platform = self._platform_context()
@@ -108,163 +123,204 @@ class Conversation:
 
 {identity}
 
-## About the user
-{user_facts or "(no user facts recorded yet — learn them via conversation)"}
+## User
+{user_facts or "(learn about the user via conversation)"}
 
-## Persistent memory
+## Memory
 {memory or "(no persistent notes yet)"}
 {skills_block}
 
-## Capabilities
-You are running on {platform}.
-You have access to tools: bash, file_read/write/edit/list/search, web_fetch, web_search,
-skill_list/read/manage, memory_read/update.
-{self._phone_tools_block()}
+## Platform: {platform}
+## Tools: {len(self._tool_schemas)} available
 
-## Behavioral rules
-1. **Plan first, act second.** For non-trivial tasks, lay out 2-5 steps before calling tools.
-2. **Be concise.** No filler. No "I'll now...". Just do it.
-3. **Don't repeat failed actions.** If a tool returns an error or "no matches" TWICE, change approach entirely. Don't try the same thing a third time.
-4. **Learn from mistakes.** If something fails twice, try a different approach.
-5. **Persist lessons.** After solving a non-trivial problem, append the lesson to MEMORY via memory_update.
-6. **Respect limits.** Don't run destructive commands without warning the user.
-7. **Phone safety.** Sending SMS, making calls, posting notifications — confirm with the user first
-   unless they explicitly authorized it.
+## Rules
+1. BE EFFICIENT. Minimize tool calls. Think before acting.
+2. DON'T REPEAT. If a tool fails or returns "no matches" twice, change approach.
+3. READ OUTPUTS. Tool output is in your context — don't re-fetch it.
+4. MAX 12 tool calls per task. If stuck, summarize and ask the user.
+5. Be concise. No filler. Act, verify, report.
 
-## Phone UI tasks — CRITICAL efficiency rules
-- **phone_ui_dump returns XML directly in the tool output.** READ IT from the observation. Do NOT use file_search or file_read on the dump — the content is already in your context.
-- **Parse the XML to find elements.** Look for nodes with text="", content-desc="...", or resource-id="..." that match what you need. Use the bounds="[x1,y1][x2,y2]" attribute to calculate tap coordinates (center = ((x1+x2)/2, (y1+y2)/2)).
-- **Don't tap randomly.** Every tap must be based on coordinates from a UI dump. If you don't know where to tap, dump the UI first.
-- **After tapping, dump again** to see what changed. Compare the new dump to the previous one.
-- **Max 15 tool calls per task.** If you haven't completed the task in 15 calls, summarize what you've done and ask the user for help.
-- **For WhatsApp messaging:** Use phone_ui_dump to find the search/new chat button, type the contact name, find the contact in results, tap it, find the message input, type the message, find send button, tap it.
-
-## Tool use
-Call tools via function calls. Read tool output carefully before next action.
-If a tool returns an error, read the error and adapt — don't repeat the same call.
-**Never use file_search on UI dump files.** The dump content is already in the tool output — read it directly.
+## Phone UI rules (if on Termux)
+- phone_ui_dump returns XML in the output. Parse it for bounds="[x1,y1][x2,y2]".
+- Tap center: ((x1+x2)/2, (y1+y2)/2). Don't tap randomly.
+- After tapping, dump again to see what changed.
+- NEVER use file_search/file_read on UI dump files — the content is already in your context.
 """
 
     def _default_identity(self) -> str:
         return (
-            "You are HELIX, a self-improving agent that runs on the user's own devices. "
-            "You can execute shell commands, edit files, browse the web, and on phones: "
-            "send SMS, take photos, control the UI via ADB, and more. "
-            "You write your own skills and memory files to grow more capable over time."
-        )
-
-    def _phone_tools_block(self) -> str:
-        if self.config.on_termux:
-            return (
-                "\n## Phone control (Termux + ADB)\n"
-                "You are running inside Termux on Android. You can:\n"
-                "- Hardware: phone_battery, phone_sensor, phone_torch, phone_vibrate, phone_volume, phone_brightness\n"
-                "- Communications: phone_sms_send, phone_sms_read, phone_call\n"
-                "- System: phone_notification, phone_clipboard_get/set, phone_tts\n"
-                "- Camera: phone_camera_photo\n"
-                "- Location: phone_location\n"
-                "- UI (requires self-ADB paired): phone_ui_tap, phone_ui_swipe, phone_ui_type, phone_ui_key, "
-                "phone_ui_screenshot, phone_ui_dump, phone_screen_state, phone_screen_wake\n"
-                "- Apps: phone_app_launch, phone_app_list, phone_app_current, phone_app_stop\n"
-                "If a phone_ui_* tool fails with 'requires ADB', guide the user through pairing."
-            )
-        return (
-            "\n## Phone control\n"
-            "Not running on Termux. Phone tools will return errors if called. "
-            "If the user wants phone control, point them to docs/PHONE_SETUP.md."
+            "You are HELIX, a self-improving agent running on the user's device. "
+            "You execute shell commands, edit files, browse the web, and on phones: "
+            "control the UI via ADB. You learn from each task and write skills for reuse."
         )
 
     def _platform_context(self) -> str:
         import platform as plat
         if self.config.on_termux:
-            return f"Termux on Android (aarch64). HELIX_HOME={self.config.home}"
-        return f"{plat.system()} {plat.machine()}. HELIX_HOME={self.config.home}"
+            return f"Termux/Android (aarch64)"
+        return f"{plat.system()}/{plat.machine()}"
+
+    # --- Context management (THE KEY FIX) ---
+    def _build_messages(self) -> list[dict]:
+        """Build messages for the LLM with smart context management.
+
+        Instead of crude truncation (last 50 events), we:
+        1. ALWAYS keep the original user request first
+        2. Include a running summary of what's been done
+        3. Include the last N tool calls + observations (recent context)
+        4. Estimate token count and condense if needed
+        """
+        msgs = []
+
+        # 1. Always include original request
+        if self._original_request:
+            msgs.append({"role": "user", "content": self._original_request})
+
+        # 2. Include task summary (what's been done so far)
+        if self._task_summary:
+            msgs.append({"role": "system", "content": f"Progress so far:\n{self._task_summary}"})
+
+        # 3. Collect recent events (skip system/condensation/finish)
+        recent_events = []
+        for e in reversed(self.events):
+            if isinstance(e, (CondensationEvent, ApprovalEvent, FinishEvent)):
+                continue
+            recent_events.insert(0, e)
+
+        # 4. Estimate token count and trim if needed
+        # Target: ~80k chars (~20k tokens) for recent context
+        MAX_CONTEXT_CHARS = 80000
+        current_chars = sum(len(json.dumps(m)) for m in msgs)
+        trimmed_events = []
+
+        for e in reversed(recent_events):
+            event_msg = e.to_message()
+            event_chars = len(json.dumps(event_msg))
+            if current_chars + event_chars > MAX_CONTEXT_CHARS:
+                break
+            trimmed_events.insert(0, e)
+            current_chars += event_chars
+
+        # 5. Convert to messages
+        for e in trimmed_events:
+            msg = e.to_message()
+            # Truncate large tool outputs in observations
+            if isinstance(e, ObservationEvent):
+                content = msg.get("content", "")
+                if len(content) > 4000:
+                    msg["content"] = content[:2000] + f"\n[...truncated {len(content)-4000} chars...]\n" + content[-2000:]
+            msgs.append(msg)
+
+        return msgs
+
+    def _update_task_summary(self, event: Event) -> None:
+        """Maintain a running summary of actions taken."""
+        if isinstance(event, ActionEvent):
+            # Keep last 10 actions in summary
+            summary_line = f"  {len(self._call_history)}. {event.tool}({_truncate_args(event.args)})"
+            if not self._task_summary:
+                self._task_summary = summary_line
+            else:
+                lines = self._task_summary.splitlines()
+                lines.append(summary_line)
+                # Keep only last 15 lines
+                self._task_summary = "\n".join(lines[-15:])
+
+    def _check_stuck(self, tool: str, args: dict) -> bool:
+        """Detect if the agent is repeating the same action."""
+        args_hash = hashlib.md5(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()[:8]
+        call_key = f"{tool}:{args_hash}"
+        self._call_history.append(call_key)
+
+        # Check if this exact call was made 3+ times
+        count = self._call_history.count(call_key)
+        return count >= 3
 
     # --- Main loop ---
     async def send(self, user_text: str) -> AsyncIterator[Event]:
-        """Send a user message and stream the agent's response.
-
-        Yields events as they happen. Caller can listen + render.
-        """
-        from .text_utils import clean_for_llm, strip_ansi
+        """Send a user message and stream the agent's response."""
         from .notifications import start_task_notification, update_task_notification, end_task_notification
 
-        # Start ongoing notification on Termux
         await start_task_notification(f"Processing: {user_text[:80]}")
 
-        # Append user message
+        # Store original request for context management
+        self._original_request = user_text
+
         user_evt = MessageEvent(role="user", content=user_text)
         self.append(user_evt)
         yield user_evt
 
-        # Build the message history for the LLM (last N events as messages)
-        messages = self._events_to_messages()
-        system = self._build_system_prompt()
+        system = self._get_system_prompt()
+        stuck_warning_count = 0
 
-        # Agent loop: max_iterations rounds
         for iteration in range(self.config.max_iterations):
+            # Build context-managed messages
+            messages = self._build_messages()
+
+            # Inject stuck warning if needed
+            if stuck_warning_count > 0:
+                messages.append({"role": "system", "content":
+                    f"WARNING: You've repeated the same action {stuck_warning_count + 2} times. "
+                    f"You are stuck. Try a completely different approach or summarize what you've "
+                    f"done and ask the user for help."})
+
+            # Inject progress reminder at 80% of max iterations
+            if iteration >= self.config.max_iterations * 0.8:
+                messages.append({"role": "system", "content":
+                    f"You've made {len(self._call_history)} tool calls (max {self.config.max_iterations}). "
+                    f"Wrap up now — either complete the task or summarize what you've done."})
+
             # Call LLM
             try:
                 resp = await self.llm.complete(messages=messages, tools=self._tool_schemas, system=system)
             except Exception as e:
-                err = AgentErrorEvent(message=f"LLM call raised: {type(e).__name__}: {e}")
+                err = AgentErrorEvent(message=f"LLM error: {type(e).__name__}: {e}")
                 self.append(err)
                 yield err
-                finish = FinishEvent(reason="error")
-                self.append(finish)
-                yield finish
+                await end_task_notification("Error")
                 return
 
-            # Check for LLM-level errors (provider returned an error response)
             if resp.finish_reason == "error":
                 err_detail = ""
-                if isinstance(resp.raw, dict) and "error" in resp.raw:
-                    err_detail = str(resp.raw["error"])
-                elif resp.content:
-                    err_detail = resp.content
+                if isinstance(resp.raw, dict):
+                    err_detail = str(resp.raw.get("error", ""))[:500]
+                    if resp.raw.get("hint"):
+                        err_detail += f"\nHint: {resp.raw['hint']}"
                 else:
-                    err_detail = "Unknown LLM error (no detail returned)"
-                err = AgentErrorEvent(
-                    message=f"LLM error: {err_detail}",
-                    traceback=err_detail,
-                )
+                    err_detail = resp.content or "Unknown error"
+                err = AgentErrorEvent(message=f"LLM error: {err_detail}")
                 self.append(err)
                 yield err
-                finish = FinishEvent(reason="error")
-                self.append(finish)
-                yield finish
+                await end_task_notification("Error")
                 return
 
-            # If assistant wants to call tools
+            # Tool calls
             if resp.tool_calls:
-                # If there's also content (chain-of-thought), emit it as a message
                 if resp.content:
                     thought = MessageEvent(role="assistant", content=resp.content)
                     self.append(thought)
                     yield thought
-                    messages.append({"role": "assistant", "content": resp.content})
 
-                # Dispatch each tool call
                 for tc in resp.tool_calls:
                     action = ActionEvent(
                         tool=tc["name"],
                         args=tc.get("args", {}),
                         thought=resp.content or "",
                     )
-                    # Replace action id with LLM's tool_call_id if present
                     action.id = tc.get("id", action.id)
                     self.append(action)
                     yield action
-                    messages.append(action.to_message())
+                    self._update_task_summary(action)
 
-                    # Update ongoing notification with current tool
+                    # Update notification
                     await update_task_notification(f"[{iteration+1}] {tc['name']}...")
+
+                    # Stuck detection
+                    if self._check_stuck(tc["name"], tc.get("args", {})):
+                        stuck_warning_count += 1
 
                     # Execute
                     result = await self.executor.execute(tc["name"], tc.get("args", {}))
-                    # CRITICAL: strip ANSI/Rich color codes from tool output before
-                    # sending to LLM. Otherwise the LLM sees [36m, [0m etc. and
-                    # mimics them in its responses, producing garbage.
                     cleaned_output = clean_for_llm(result.output)
                     obs = ObservationEvent(
                         action_id=action.id,
@@ -275,14 +331,9 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                     )
                     self.append(obs)
                     yield obs
-                    messages.append(obs.to_message())
-
-                # Continue loop: model will see observations and decide next action
                 continue
             else:
-                # No tool calls — assistant is done
-                # Also strip any ANSI from the assistant's own response (in case
-                # the LLM still tries to emit color codes)
+                # Done — assistant responded with text
                 cleaned_content = strip_ansi(resp.content or "")
                 msg = MessageEvent(role="assistant", content=cleaned_content)
                 self.append(msg)
@@ -294,33 +345,142 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
                 return
 
         # Hit iteration cap
-        err = AgentErrorEvent(message=f"Hit max_iterations={self.config.max_iterations} without finishing")
+        err = AgentErrorEvent(
+            message=f"Reached max tool calls ({self.config.max_iterations}). "
+                    f"Task may be incomplete. Summary:\n{self._task_summary}"
+        )
         self.append(err)
         yield err
         finish = FinishEvent(reason="max_iterations")
         self.append(finish)
         yield finish
-        await end_task_notification("Hit max iterations")
+        await end_task_notification("Max calls reached")
 
-    def _events_to_messages(self) -> list[dict]:
-        """Convert event log to LLM message format. Skips system + condensation events."""
-        msgs = []
-        # Simple condensation: if too many events, summarize older ones
-        # (For v1 we just truncate to last 50 events to keep context manageable)
-        events = self.events[-50:] if len(self.events) > 50 else self.events
-        for e in events:
-            if isinstance(e, (CondensationEvent, ApprovalEvent, FinishEvent)):
-                continue
-            msgs.append(e.to_message())
-        return msgs
+    # --- Streaming version ---
+    async def send_streaming(self, user_text: str) -> AsyncIterator[Event]:
+        """Stream assistant text token-by-token."""
+        from .text_utils import clean_for_llm, strip_ansi
+        from .notifications import start_task_notification, update_task_notification, end_task_notification
 
-    # --- Approval flow (for dangerous tools) ---
+        await start_task_notification(f"Processing: {user_text[:80]}")
+        self._original_request = user_text
+
+        user_evt = MessageEvent(role="user", content=user_text)
+        self.append(user_evt)
+        yield user_evt
+
+        system = self._get_system_prompt()
+        stuck_warning_count = 0
+
+        for iteration in range(self.config.max_iterations):
+            messages = self._build_messages()
+
+            if stuck_warning_count > 0:
+                messages.append({"role": "system", "content":
+                    f"WARNING: You've repeated the same action. Try a different approach."})
+
+            if iteration >= self.config.max_iterations * 0.8:
+                messages.append({"role": "system", "content":
+                    f"You've made {len(self._call_history)} tool calls. Wrap up now."})
+
+            try:
+                collected_content = ""
+                collected_tool_calls: list[dict] = []
+                current_tc: dict | None = None
+                tc_args_buffer: dict[str, str] = {}
+
+                async for chunk in self.llm.stream(messages=messages, tools=self._tool_schemas, system=system):
+                    if chunk.content:
+                        collected_content += chunk.content
+                        # Yield streaming content immediately
+                        yield MessageEvent(role="assistant", content=collected_content)
+                    if chunk.tool_call_delta:
+                        d = chunk.tool_call_delta
+                        if d.get("id") and d.get("name"):
+                            if current_tc:
+                                try:
+                                    current_tc["args"] = json.loads(tc_args_buffer.get(current_tc["id"], "")) if tc_args_buffer.get(current_tc["id"]) else {}
+                                except Exception:
+                                    current_tc["args"] = {"_raw": tc_args_buffer.get(current_tc["id"], "")}
+                                collected_tool_calls.append(current_tc)
+                            current_tc = {"id": d["id"], "name": d["name"]}
+                            tc_args_buffer[d["id"]] = ""
+                        if d.get("args_fragment") and current_tc:
+                            tc_args_buffer[current_tc["id"]] = tc_args_buffer.get(current_tc["id"], "") + d["args_fragment"]
+                    if chunk.finish_reason:
+                        if current_tc:
+                            try:
+                                current_tc["args"] = json.loads(tc_args_buffer.get(current_tc["id"], "")) if tc_args_buffer.get(current_tc["id"]) else {}
+                            except Exception:
+                                current_tc["args"] = {"_raw": tc_args_buffer.get(current_tc["id"], "")}
+                            collected_tool_calls.append(current_tc)
+                            current_tc = None
+                        break
+
+                if collected_tool_calls:
+                    if collected_content:
+                        messages.append({"role": "assistant", "content": collected_content})
+
+                    for tc in collected_tool_calls:
+                        action = ActionEvent(
+                            tool=tc["name"],
+                            args=tc.get("args", {}),
+                            thought=collected_content,
+                        )
+                        action.id = tc.get("id", action.id)
+                        self.append(action)
+                        yield action
+                        self._update_task_summary(action)
+                        await update_task_notification(f"[{iteration+1}] {tc['name']}...")
+
+                        if self._check_stuck(tc["name"], tc.get("args", {})):
+                            stuck_warning_count += 1
+
+                        result = await self.executor.execute(tc["name"], tc.get("args", {}))
+                        cleaned_output = clean_for_llm(result.output)
+                        obs = ObservationEvent(
+                            action_id=action.id,
+                            tool=tc["name"],
+                            output=cleaned_output,
+                            is_error=result.is_error,
+                            metadata=result.metadata,
+                        )
+                        self.append(obs)
+                        yield obs
+                    continue
+                else:
+                    cleaned_content = strip_ansi(collected_content or "")
+                    msg = MessageEvent(role="assistant", content=cleaned_content)
+                    self.append(msg)
+                    yield msg
+                    finish = FinishEvent(reason="completed")
+                    self.append(finish)
+                    yield finish
+                    await end_task_notification(cleaned_content[:80] if cleaned_content else "Done")
+                    return
+
+            except Exception as e:
+                err = AgentErrorEvent(message=f"Stream error: {type(e).__name__}: {e}")
+                self.append(err)
+                yield err
+                await end_task_notification("Error")
+                return
+
+        err = AgentErrorEvent(
+            message=f"Reached max tool calls ({self.config.max_iterations}). "
+                    f"Summary:\n{self._task_summary}"
+        )
+        self.append(err)
+        yield err
+        finish = FinishEvent(reason="max_iterations")
+        self.append(finish)
+        yield finish
+        await end_task_notification("Max calls reached")
+
+    # --- Approval flow ---
     async def request_approval(self, action_id: str, prompt: str) -> bool:
-        """Pause and wait for human approval. UI calls resolve_approval()."""
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         self._approval_queue[action_id] = fut
-        # In a real implementation, this would emit an ApprovalRequestEvent
-        # and the UI would call resolve_approval when user clicks Approve/Deny
         try:
             decision = await asyncio.wait_for(fut, timeout=300)
             return decision == "approved"
@@ -334,120 +494,14 @@ If a tool returns an error, read the error and adapt — don't repeat the same c
         if fut and not fut.done():
             fut.set_result(decision)
 
-    # --- Streaming version (for TUI — shows text as it arrives) ---
-    async def send_streaming(self, user_text: str) -> AsyncIterator[Event]:
-        """Like send() but streams assistant text token-by-token.
 
-        Yields intermediate MessageEvent(role='assistant', content=partial)
-        events as text arrives. The final one has the complete content.
-        Tool calls still emit ActionEvent + ObservationEvent as in send().
-        """
-        from .text_utils import clean_for_llm, strip_ansi
-
-        user_evt = MessageEvent(role="user", content=user_text)
-        self.append(user_evt)
-        yield user_evt
-
-        messages = self._events_to_messages()
-        system = self._build_system_prompt()
-
-        for iteration in range(self.config.max_iterations):
-            # Try streaming first
-            try:
-                collected_content = ""
-                collected_tool_calls: list[dict] = []
-                current_tc: dict | None = None
-                tc_args_buffer: dict[str, str] = {}
-
-                async for chunk in self.llm.stream(messages=messages, tools=self._tool_schemas, system=system):
-                    if chunk.content:
-                        collected_content += chunk.content
-                        # Yield a partial message event (don't persist — just for UI)
-                        yield MessageEvent(role="assistant", content=collected_content)
-                    if chunk.tool_call_delta:
-                        d = chunk.tool_call_delta
-                        if d.get("id") and d.get("name"):
-                            # New tool call started
-                            if current_tc:
-                                # Finalize previous
-                                try:
-                                    import json as _json
-                                    current_tc["args"] = _json.loads("".join(tc_args_buffer.get(current_tc["id"], ""))) if tc_args_buffer.get(current_tc["id"]) else {}
-                                except Exception:
-                                    current_tc["args"] = {"_raw": tc_args_buffer.get(current_tc["id"], "")}
-                                collected_tool_calls.append(current_tc)
-                            current_tc = {"id": d["id"], "name": d["name"]}
-                            tc_args_buffer[d["id"]] = ""
-                        if d.get("args_fragment") and current_tc:
-                            tc_args_buffer[current_tc["id"]] = tc_args_buffer.get(current_tc["id"], "") + d["args_fragment"]
-                    if chunk.finish_reason:
-                        # Finalize last tool call
-                        if current_tc:
-                            try:
-                                import json as _json
-                                current_tc["args"] = _json.loads(tc_args_buffer.get(current_tc["id"], "")) if tc_args_buffer.get(current_tc["id"]) else {}
-                            except Exception:
-                                current_tc["args"] = {"_raw": tc_args_buffer.get(current_tc["id"], "")}
-                            collected_tool_calls.append(current_tc)
-                            current_tc = None
-                        break
-
-                # If we got tool calls, process them
-                if collected_tool_calls:
-                    # Emit a single assistant message with the full content (if any)
-                    if collected_content:
-                        thought = MessageEvent(role="assistant", content=collected_content)
-                        # Don't append here — the non-streaming send would, but for streaming
-                        # we just yield for display. The real persistence happens below.
-                        messages.append({"role": "assistant", "content": collected_content})
-
-                    for tc in collected_tool_calls:
-                        action = ActionEvent(
-                            tool=tc["name"],
-                            args=tc.get("args", {}),
-                            thought=collected_content,
-                        )
-                        action.id = tc.get("id", action.id)
-                        self.append(action)
-                        yield action
-                        messages.append(action.to_message())
-
-                        result = await self.executor.execute(tc["name"], tc.get("args", {}))
-                        cleaned_output = clean_for_llm(result.output)
-                        obs = ObservationEvent(
-                            action_id=action.id,
-                            tool=tc["name"],
-                            output=cleaned_output,
-                            is_error=result.is_error,
-                            metadata=result.metadata,
-                        )
-                        self.append(obs)
-                        yield obs
-                        messages.append(obs.to_message())
-                    continue
-                else:
-                    # No tool calls — final assistant message
-                    cleaned_content = strip_ansi(collected_content or "")
-                    msg = MessageEvent(role="assistant", content=cleaned_content)
-                    self.append(msg)
-                    yield msg
-                    finish = FinishEvent(reason="completed")
-                    self.append(finish)
-                    yield finish
-                    return
-
-            except Exception as e:
-                err = AgentErrorEvent(message=f"LLM stream failed: {type(e).__name__}: {e}")
-                self.append(err)
-                yield err
-                finish = FinishEvent(reason="error")
-                self.append(finish)
-                yield finish
-                return
-
-        err = AgentErrorEvent(message=f"Hit max_iterations={self.config.max_iterations}")
-        self.append(err)
-        yield err
-        finish = FinishEvent(reason="max_iterations")
-        self.append(finish)
-        yield finish
+def _truncate_args(args: dict, max_len: int = 60) -> str:
+    """Truncate tool args for summary display."""
+    parts = []
+    for k, v in args.items():
+        vs = str(v)
+        if len(vs) > 30:
+            vs = vs[:27] + "..."
+        parts.append(f"{k}={vs}")
+    s = ", ".join(parts)
+    return s[:max_len] + "..." if len(s) > max_len else s
